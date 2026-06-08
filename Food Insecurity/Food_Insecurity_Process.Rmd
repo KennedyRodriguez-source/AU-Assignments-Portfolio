@@ -1,0 +1,780 @@
+---
+title: "Food Insecurity Survey Methodology and Data Processing - Revised"
+author: "Kennedy Rodriguez and Others"
+date: "2024-11-18"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    theme: readable
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+# knitr::opts_chunk$set(
+#   fig.path = "Figures/"
+# )
+```
+
+# Introduction
+
+This document explains the process behind our food insecurity survey project in Washington, DC. The main report focuses on the final findings, while this file serves more as the technical and methodological appendix. It shows how the survey was designed, how sampling locations were selected, how the raw survey responses were cleaned, and how the analysis data set was prepared.
+
+The main research question for the project was simple on the surface:
+
+> **Is obtaining food a problem for DC residents, and what factors help explain that perception?**
+
+Since food insecurity can be connected to affordability, transportation, household size, and distance from food sources, we focused our survey and sampling design around those themes. The goal was not just to analyze existing data, but to create and carry out our own survey in a way that could still be supported by public data and geographic information.
+
+# Survey Instrument
+
+The survey was designed to collect demographic, transportation, affordability, and food access information. We kept the questionnaire short because the survey was administered in person, and a long survey would likely have reduced participation.
+
+The final survey included the following questions:
+
+1. What is your age?
+2. What gender do you identify as?
+3. How many people live in your household, including yourself?
+4. Do you live in DC?
+5. How many cars does your household have?
+6. What transportation means do you use most frequently to get food?
+7. How many miles away is your primary grocery shopping store, supermarket, or food pantry?
+8. Do you have access to affordable, fresh food near your residence?
+9. On average, percentage wise, how much of your paycheck do you spend on groceries?
+10. Do you think obtaining food is a problem?
+
+The last question became the response variable for the logistic regression model. The earlier questions were intended to capture possible explanatory variables related to cost, distance, transportation access, and household context.
+
+
+
+```{r libraries}
+library(sf)
+library(tidyverse)
+library(leaflet)
+library(skimr)
+library(knitr)
+library(forcats)
+library(scales)
+library(car)
+
+
+has_pROC <- requireNamespace("pROC", quietly = TRUE)
+```
+
+```{r helper-functions}
+
+find_file <- function(filename) {
+  if (file.exists(filename)) return(filename)
+  alt <- sub("(\\.[^.]+)$", "(1)\\1", filename)
+  if (file.exists(alt)) return(alt)
+  stop(paste("Could not find", filename, "or", alt))
+}
+
+clean_text <- function(x) {
+  iconv(x, from = "", to = "UTF-8", sub = "")
+}
+```
+
+# Data Sources
+
+The project used multiple data sources because food access is not only a survey question. It also has geographic and transportation dimensions. We used ACS census tract data to represent economic differences across DC, Metrobus stop data to support sampling locations, and grocery store location data to provide food access context.
+
+```{r read-files}
+DCBoundariesdf <- read_csv(find_file("ACS_5-Year_Economic_Characteristics_DC_Census_Tract.csv"), show_col_types = FALSE)
+DCBusRoutedf <- read_csv(find_file("Metro_Bus_Stops.csv"), show_col_types = FALSE)
+Questionnaire_raw <- read_csv(find_file("Questionnaire.csv"), show_col_types = FALSE)
+
+DCBoundariesGeo <- st_read(find_file("ACS_5-Year_Economic_Characteristics_DC_Census_Tract.geojson"), quiet = TRUE)
+DCGroceriesGeo <- st_read(find_file("Grocery_Store_Locations.geojson"), quiet = TRUE)
+DCBusRouteGeo <- st_read(find_file("Metro_Bus_Stops.geojson"), quiet = TRUE)
+```
+
+```{r file-overview}
+cat("ACS tract rows:", nrow(DCBoundariesdf), "\n")
+cat("Bus stop rows:", nrow(DCBusRoutedf), "\n")
+cat("Raw survey rows:", nrow(Questionnaire_raw), "\n")
+```
+
+# Geographic Context
+
+Before selecting survey locations, we first looked at the geographic structure of DC using census tract boundaries, grocery store locations, and Metrobus stops. This helped us understand the physical context behind food access.
+
+```{r dc-boundary-map}
+ggplot(data = DCBoundariesGeo) +
+  geom_sf(fill = "gray95", color = "gray50", linewidth = 0.1) +
+  labs(title = "DC Census Tract Boundaries") +
+  theme_minimal()
+```
+
+```{r grocery-map}
+# Aligning coordinate reference systems before plotting.
+DCGroceriesGeo <- st_transform(DCGroceriesGeo, st_crs(DCBoundariesGeo))
+
+picture1 <- ggplot() +
+  geom_sf(data = DCBoundariesGeo, fill = "gray95", color = "gray70", linewidth = 0.1) +
+  geom_sf(data = DCGroceriesGeo, color = "red", alpha = 0.7, size = 1) +
+  labs(title = "Grocery Store Locations in Washington, DC") +
+  theme_minimal()
+
+picture1
+```
+
+```{r bus-stop-map}
+DCBusRouteGeo <- st_transform(DCBusRouteGeo, st_crs(DCBoundariesGeo))
+
+ggplot() +
+  geom_sf(data = DCBoundariesGeo, fill = "gray95", color = "gray70", linewidth = 0.1) +
+  geom_sf(data = DCBusRouteGeo, color = "blue", size = 0.1, alpha = 0.25) +
+  labs(title = "Metrobus Stops in Washington, DC") +
+  theme_minimal()
+```
+
+# Research and Sampling Approach
+
+Our project focused on food insecurity in DC, with particular attention to distance and affordability. Because the final outcome was a yes/no style response to whether obtaining food was a problem, logistic regression was the planned modeling approach.
+
+For sampling, we wanted a design that would provide some geographic representation while still being possible to carry out in person. A simple random sample of all DC residents would have been ideal statistically, but it was not practical for a student field survey. A fully stratified design would also have required more detailed population information and more time than we had available. For that reason, we used a multi-stage cluster sampling strategy.
+
+This approach was not perfect, but it allowed us to connect the survey to real geographic and socioeconomic conditions in DC.
+
+# Stage One: Income-Based Census Tract Clustering
+
+Because affordability was one of the main ideas in the project, we used ACS mean income data to group DC census tracts into income-based clusters. The ACS file contained 206 census tracts, which became the geographic units for the first stage of the sampling design.
+
+```{r income-clusters}
+income_data <- DCBoundariesdf %>% 
+  select(DP03_0063E) %>% 
+  drop_na()
+
+income_data_scaled <- scale(income_data)
+
+set.seed(123)
+k <- 5
+kmeans_result <- kmeans(income_data_scaled, centers = k)
+
+# Adding the cluster assignment back into the ACS data.
+DCBoundariesdf$cluster <- kmeans_result$cluster
+```
+
+```{r cluster-summary}
+cluster_summary <- DCBoundariesdf %>%
+  group_by(cluster) %>%
+  summarize(
+    tracts = n(),
+    min_income = min(DP03_0063E, na.rm = TRUE),
+    median_income = median(DP03_0063E, na.rm = TRUE),
+    max_income = max(DP03_0063E, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(median_income)
+
+kable(cluster_summary, digits = 0)
+```
+
+The five clusters summarize income differences across census tracts. We then selected one cluster above the median income cluster and one below it. In the original sampling plan, these became Cluster 2 and Cluster 5. This gave the survey locations a clearer connection to affordability, while still keeping the project feasible.
+
+```{r join-cluster-data}
+DCBoundariesGeoJoined <- DCBoundariesGeo %>%
+  left_join(DCBoundariesdf, by = "OBJECTID")
+```
+
+```{r cluster-map}
+cluster_pal_all <- colorFactor(palette = "Set3", domain = DCBoundariesGeoJoined$cluster)
+
+leaflet(data = DCBoundariesGeoJoined) %>%
+  addTiles() %>%
+  addPolygons(
+    fillColor = ~cluster_pal_all(cluster),
+    color = "black",
+    weight = 1,
+    fillOpacity = 0.7,
+    popup = ~paste("Cluster:", cluster)
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = cluster_pal_all,
+    values = ~cluster,
+    title = "Income cluster",
+    opacity = 1
+  )
+```
+
+```{r selected-cluster-map}
+selected_cluster_ids <- c(2, 5)
+cluster_pal_selected <- colorFactor(palette = c("yellow", "pink"), domain = selected_cluster_ids)
+
+leaflet(data = DCBoundariesGeoJoined) %>%
+  addTiles() %>%
+  addPolygons(
+    fillColor = ~ifelse(cluster == 2, "yellow", ifelse(cluster == 5, "pink", "transparent")),
+    color = "black",
+    weight = 1,
+    fillOpacity = ~ifelse(cluster %in% selected_cluster_ids, 0.7, 0.05),
+    popup = ~paste("Cluster:", cluster)
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    pal = cluster_pal_selected,
+    values = selected_cluster_ids,
+    title = "Selected clusters",
+    opacity = 1
+  )
+```
+
+## Target Sample Size
+
+Using population information and a standard sample size formula, the ideal sample sizes for Cluster 2 and Cluster 5 were larger than what could realistically be collected during the available field period. This was an important limitation of the project. Rather than ignoring this, we treated it as a practical constraint of field-based survey research.
+
+```{r sample-size-cluster}
+N <- 556781
+Z <- 1.96
+p5 <- 0.315
+p2 <- 0.138
+E <- 0.05
+
+n2 <- (N * Z^2 * p2 * (1 - p2)) / (E^2 * (N - 1) + Z^2 * p2 * (1 - p2))
+n5 <- (N * Z^2 * p5 * (1 - p5)) / (E^2 * (N - 1) + Z^2 * p5 * (1 - p5))
+
+sample_size_table <- tibble(
+  cluster = c(2, 5),
+  estimated_population_share = c(p2, p5),
+  target_sample_size = round(c(n2, n5))
+)
+
+kable(sample_size_table)
+```
+
+The calculated sample sizes were useful as a statistical reference point, but the actual survey required a smaller and more practical field plan. This is a common issue in survey work: the ideal design and the possible design are not always the same.
+
+# Stage Two: Bus Route and Bus Stop Sampling
+
+After selecting the income clusters, we used Metrobus stops to identify possible survey locations. Bus stops were practical because they are public locations and are connected to transportation access, which was one of the themes of the project.
+
+```{r bus-stops-in-clusters}
+# Join bus stops to census tract clusters so each stop can inherit a cluster label.
+DCBusRouteGeo_clustered <- st_join(
+  DCBusRouteGeo,
+  DCBoundariesGeoJoined %>% select(OBJECTID, cluster),
+  join = st_intersects,
+  left = FALSE
+)
+
+DCBusRouteGeo_clipped <- DCBusRouteGeo_clustered %>%
+  filter(cluster %in% selected_cluster_ids)
+
+cat("Bus stops located inside selected clusters:", nrow(DCBusRouteGeo_clipped), "\n")
+```
+
+```{r selected-clusters-bus-map}
+leaflet() %>%
+  addTiles() %>%
+  addPolygons(
+    data = DCBoundariesGeoJoined,
+    fillColor = ~ifelse(cluster == 2, "yellow", ifelse(cluster == 5, "pink", "transparent")),
+    color = "black",
+    weight = 1,
+    fillOpacity = ~ifelse(cluster %in% selected_cluster_ids, 0.7, 0.05),
+    popup = ~paste("Cluster:", cluster),
+    group = "Selected census tracts"
+  ) %>%
+  addCircleMarkers(
+    data = DCBusRouteGeo_clipped,
+    color = "blue",
+    radius = 1,
+    fillOpacity = 0.25,
+    group = "Bus stops"
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Selected census tracts", "Bus stops"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    colors = c("yellow", "pink"),
+    labels = c("Cluster 2", "Cluster 5"),
+    title = "Selected clusters",
+    opacity = 1
+  )
+```
+
+The original project selected 10 bus routes per cluster through simple random sampling and then selected final bus stops from those routes. This balanced geographic coverage with the reality that the survey had to be administered in person.
+
+```{r bus-route-lists}
+cluster_2_busroutes <- c(
+  10347772, 13000802, 15031912, 13071892, 12019822, 12001302, 
+  12026912, 12001502, 12042442, 12050892, 12036722, 11068382, 
+  11001602, 11001402, 11001102, 47079592, 11000702, 11087232, 
+  11036722, 11068902, 47083652, 11040042, 11052062, 11009422, 
+  11060642, 11017812, 11060122, 11063762, 11025152, 11094052, 
+  11059602, 11057912, 11057002, 11071632, 11094252, 11002902, 
+  11024632, 11072862, 11069812, 11030872, 11065842, 11003702, 
+  11084562, 11015472, 11075332, 11037892
+)
+
+cluster_5_busroutes <- c(
+  14059452, 14022552, 15081252, 13009362, 13058542, 13059452, 
+  13060382, 13077742, 13063502, 13017352, 13069812, 13061162, 
+  13075662, 13081512, 13015342, 13042442, 13035812, 13005102, 
+  15031912, 13071892, 13047772, 13031332, 14047972, 14000302, 
+  14057852, 14000602, 14000402, 12026912, 12001502, 12001802, 
+  12015342, 12036722, 12061622, 12086642, 12015992, 47049042, 
+  12059172, 12089962, 12075462, 12002202, 12031982, 12001402, 
+  12081442, 12078192, 12001202, 12001002, 12084892, 12060582, 
+  12000632, 12000132, 58011362, 12023332, 12064872, 12076052, 
+  12064222, 11051352, 12051352, 11064222, 15065322, 58004762, 
+  11000102, 12000702, 12000402, 12000202, 12074032, 12042442, 
+  36005892, 11000502, 11050892, 11000702, 11001402, 11001302, 
+  11001102, 11075462, 11068382, 11040042, 11024632, 11043742, 
+  11052972, 11001602, 11052062, 58018102, 11009422, 11071632, 
+  11025152, 11076892, 11059602, 11086972, 11027752, 11063762, 
+  11087232, 47003962, 11047772, 21050891, 36004162, 11089892, 
+  13001102, 14047772, 11042442, 11064282
+)
+
+set.seed(124)
+sampled_clusters5 <- sample(cluster_5_busroutes, 10, replace = FALSE)
+sampled_clusters2 <- sample(cluster_2_busroutes, 10, replace = FALSE)
+
+route_sample_table <- tibble(
+  cluster = c(rep(2, length(sampled_clusters2)), rep(5, length(sampled_clusters5))),
+  sampled_route_id = c(sampled_clusters2, sampled_clusters5)
+)
+
+kable(route_sample_table)
+```
+
+```{r sampled-route-map}
+DCBusRouteGeo_clipped <- DCBusRouteGeo_clipped %>%
+  mutate(
+    ROUTEID_num = suppressWarnings(as.numeric(ROUTEID)),
+    sampled_route = case_when(
+      ROUTEID_num %in% sampled_clusters2 ~ "Cluster 2 sampled route",
+      ROUTEID_num %in% sampled_clusters5 ~ "Cluster 5 sampled route",
+      TRUE ~ "Not sampled"
+    )
+  )
+
+leaflet() %>%
+  addTiles() %>%
+  addPolygons(
+    data = DCBoundariesGeoJoined,
+    fillColor = ~ifelse(cluster == 2, "yellow", ifelse(cluster == 5, "pink", "transparent")),
+    color = "black",
+    weight = 1,
+    fillOpacity = ~ifelse(cluster %in% selected_cluster_ids, 0.7, 0.05),
+    popup = ~paste("Cluster:", cluster),
+    group = "Selected census tracts"
+  ) %>%
+  addCircleMarkers(
+    data = DCBusRouteGeo_clipped %>% filter(sampled_route != "Not sampled"),
+    color = ~ifelse(sampled_route == "Cluster 2 sampled route", "blue", "purple"),
+    radius = 2,
+    fillOpacity = 0.7,
+    popup = ~paste("ROUTEID:", ROUTEID),
+    group = "Sampled routes"
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Selected census tracts", "Sampled routes"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    colors = c("yellow", "pink"),
+    labels = c("Cluster 2", "Cluster 5"),
+    title = "Selected clusters",
+    opacity = 1
+  ) %>%
+  addLegend(
+    position = "topright",
+    colors = c("blue", "purple"),
+    labels = c("Cluster 2 sampled routes", "Cluster 5 sampled routes"),
+    title = "Sampled routes",
+    opacity = 1
+  )
+```
+
+## Final Bus Stop Selection
+
+From the selected routes, we identified visible bus stops in the selected cluster areas and then selected final bus stop locations through simple random sampling. The final field plan included 24 bus stops: 10 from Cluster 2 and 14 from Cluster 5.
+
+```{r bus-stop-srs}
+visible_circles <- DCBusRouteGeo_clipped %>%
+  filter(ROUTEID_num %in% c(sampled_clusters5, sampled_clusters2))
+
+blue_REG_ID <- visible_circles %>%
+  filter(ROUTEID_num %in% sampled_clusters2) %>%
+  st_drop_geometry() %>%
+  pull(REG_ID) %>%
+  unique()
+
+purple_REG_ID <- visible_circles %>%
+  filter(ROUTEID_num %in% sampled_clusters5) %>%
+  st_drop_geometry() %>%
+  pull(REG_ID) %>%
+  unique()
+
+purple_df <- DCBusRoutedf %>% filter(REG_ID %in% purple_REG_ID)
+blue_df <- DCBusRoutedf %>% filter(REG_ID %in% blue_REG_ID)
+
+set.seed(156)
+purple_sample <- purple_df %>% sample_n(min(14, nrow(.)))
+blue_sample <- blue_df %>% sample_n(min(10, nrow(.)))
+
+purple_bstp_geo_ids <- purple_sample$REG_ID
+blue_bstp_geo_ids <- blue_sample$REG_ID
+combined_bstp_geo_ids <- c(purple_bstp_geo_ids, blue_bstp_geo_ids)
+```
+
+```{r final-bus-stop-map}
+leaflet() %>%
+  addTiles() %>%
+  addPolygons(
+    data = DCBoundariesGeoJoined,
+    fillColor = ~ifelse(cluster == 2, "yellow", ifelse(cluster == 5, "pink", "transparent")),
+    color = "black",
+    weight = 1,
+    fillOpacity = ~ifelse(cluster %in% selected_cluster_ids, 0.7, 0.05),
+    popup = ~paste("Cluster:", cluster),
+    group = "Selected census tracts"
+  ) %>%
+  addCircleMarkers(
+    data = DCBusRouteGeo_clipped,
+    color = ~ifelse(REG_ID %in% combined_bstp_geo_ids, "red", "transparent"),
+    radius = ~ifelse(REG_ID %in% combined_bstp_geo_ids, 5, 0),
+    fillOpacity = ~ifelse(REG_ID %in% combined_bstp_geo_ids, 1, 0),
+    popup = ~paste("Bus stop:", BSTP_MSG_TEXT),
+    group = "Selected bus stops"
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Selected census tracts", "Selected bus stops"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  addLegend(
+    position = "bottomright",
+    colors = c("yellow", "pink", "red"),
+    labels = c("Cluster 2", "Cluster 5", "Selected bus stops"),
+    title = "Sampling design",
+    opacity = 1
+  )
+```
+
+```{r selected-bus-stop-tables}
+Cluster2Loc <- blue_sample %>% select(REG_ID, BSTP_MSG_TEXT)
+Cluster5Loc <- purple_sample %>% select(REG_ID, BSTP_MSG_TEXT)
+
+kable(Cluster2Loc, caption = "Selected Bus Stops: Cluster 2")
+kable(Cluster5Loc, caption = "Selected Bus Stops: Cluster 5")
+```
+
+# Survey Response Cleaning
+
+After the field survey was completed, the raw responses were imported and cleaned. The goal of this stage was to keep valid observations from the target population, standardize responses, convert numeric variables, and prepare the dataset for logistic regression.
+
+```{r clean-questionnaire}
+Questionnaire <- Questionnaire_raw %>%
+  mutate(across(where(is.character), clean_text))
+
+# The first rows contained non-response 
+Questionnaire <- Questionnaire[-c(1:13), ]
+
+# Remove timestamp if present.
+Questionnaire <- Questionnaire %>% select(-any_of("Timestamp"))
+
+# Filtering to the target population and usable response variable.
+Questionnaire <- Questionnaire %>%
+  filter(!`What is your age?` %in% c("Under 18", "Under 16", "Under 16 (not target demo)")) %>%
+  filter(`Do you live in the DC area?` != "No") %>%
+  filter(!is.na(`Do you think obtaining food is a problem?`))
+
+# Keep columns with enough information.
+na_proportion <- colMeans(is.na(Questionnaire))
+Questionnaire <- Questionnaire[, na_proportion <= 0.7]
+
+# Remove entries where the grocery spending question was answered as a dollar amount instead of a percent.
+Questionnaire <- Questionnaire %>%
+  filter(!`On average, percentage wise, how much of your paycheck do you spend on groceries?` %in% c("100/month", "$50"))
+
+# Convert numeric variables.
+Questionnaire$`How many miles away is your primary grocery shopping store (supermarket, food pantry, etc)?` <- 
+  as.numeric(Questionnaire$`How many miles away is your primary grocery shopping store (supermarket, food pantry, etc)?`)
+
+Questionnaire$`On average, percentage wise, how much of your paycheck do you spend on groceries?` <- 
+  as.numeric(Questionnaire$`On average, percentage wise, how much of your paycheck do you spend on groceries?`)
+
+# Renaming columns to shorter names for analysis.
+colnames(Questionnaire) <- c(
+  "Age",
+  "Household Size",
+  "Live in DC",
+  "Number of Cars",
+  "Primary Transportation for Food",
+  "Distance to Grocery Store (miles)",
+  "Access to Affordable Fresh Food",
+  "Percent of Paycheck Spent on Groceries",
+  "Is Food a Problem?",
+  "REG_ID",
+  "Gender",
+  "Cluster",
+  "PersonID"
+)
+
+Questionnaire <- Questionnaire %>%
+  mutate(
+    `Live in DC` = str_replace(`Live in DC`, "Yes, momentarily \\(More than one month but less than a year \\)", "Yes, momentarily"),
+    PersonID = row_number(),
+    Cluster = ifelse(REG_ID == 1001371, 2, Cluster)
+  )
+```
+
+```{r cleaned-survey-overview}
+cat("Cleaned survey observations:", nrow(Questionnaire), "\n")
+cat("Cleaned survey variables:", ncol(Questionnaire), "\n")
+
+missing_cleaned <- tibble(
+  variable = names(Questionnaire),
+  missing_count = colSums(is.na(Questionnaire)),
+  missing_percent = round(colMeans(is.na(Questionnaire)) * 100, 1)
+)
+
+kable(missing_cleaned)
+```
+
+# Exploratory Analysis of Survey Responses
+
+The EDA below gives a basic sense of who responded and how respondents answered the main food access questions. Because this was a relatively small field survey, these plots should be interpreted descriptively rather than as estimates for all DC residents.
+
+```{r response-distributions}
+Questionnaire %>%
+  count(`Is Food a Problem?`) %>%
+  mutate(percent = n / sum(n)) %>%
+  ggplot(aes(x = `Is Food a Problem?`, y = n, fill = `Is Food a Problem?`)) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = paste0(n, " (", percent(percent, accuracy = 0.1), ")")), vjust = -0.3) +
+  labs(
+    title = "Responses to: Is Food a Problem?",
+    x = "Response",
+    y = "Number of respondents"
+  ) +
+  theme_minimal()
+```
+
+```{r cluster-distribution}
+Questionnaire %>%
+  count(Cluster) %>%
+  mutate(percent = n / sum(n)) %>%
+  ggplot(aes(x = factor(Cluster), y = n, fill = factor(Cluster))) +
+  geom_col(show.legend = FALSE) +
+  geom_text(aes(label = paste0(n, " (", percent(percent, accuracy = 0.1), ")")), vjust = -0.3) +
+  labs(
+    title = "Survey Responses by Selected Cluster",
+    x = "Cluster",
+    y = "Number of respondents"
+  ) +
+  theme_minimal()
+```
+
+```{r age-distribution}
+Questionnaire %>%
+  count(Age) %>%
+  mutate(percent = n / sum(n)) %>%
+  ggplot(aes(x = fct_reorder(Age, n), y = n, fill = Age)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  geom_text(aes(label = paste0(n, " (", percent(percent, accuracy = 0.1), ")")), hjust = -0.05) +
+  labs(
+    title = "Age Distribution of Respondents",
+    x = "Age group",
+    y = "Number of respondents"
+  ) +
+  theme_minimal()
+```
+
+```{r access-distribution}
+Questionnaire %>%
+  count(`Access to Affordable Fresh Food`) %>%
+  mutate(percent = n / sum(n)) %>%
+  ggplot(aes(x = fct_reorder(`Access to Affordable Fresh Food`, n), y = n, fill = `Access to Affordable Fresh Food`)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  geom_text(aes(label = paste0(n, " (", percent(percent, accuracy = 0.1), ")")), hjust = -0.05) +
+  labs(
+    title = "Perceived Access to Affordable Fresh Food",
+    x = "Response",
+    y = "Number of respondents"
+  ) +
+  theme_minimal()
+```
+
+```{r transportation-distribution}
+Questionnaire <- Questionnaire %>%
+  mutate(`Primary Transportation for Food` = str_replace(
+    `Primary Transportation for Food`,
+    "Carpooling, Riding Services, Someone else’s car",
+    "Carpooling/Riding Services/Someone else's car"
+  ))
+
+transportation_counts_data <- Questionnaire %>%
+  separate_rows(`Primary Transportation for Food`, sep = ",") %>%
+  mutate(`Primary Transportation for Food` = str_trim(`Primary Transportation for Food`)) %>%
+  count(`Primary Transportation for Food`, sort = TRUE) %>%
+  mutate(percent = n / sum(n))
+
+transportation_counts_data %>%
+  ggplot(aes(x = fct_reorder(`Primary Transportation for Food`, n), y = n)) +
+  geom_col(fill = "gray50") +
+  coord_flip() +
+  geom_text(aes(label = paste0(n, " (", percent(percent, accuracy = 0.1), ")")), hjust = -0.05) +
+  labs(
+    title = "Primary Transportation Used to Get Food",
+    x = "Transportation mode",
+    y = "Number of mentions"
+  ) +
+  theme_minimal()
+```
+
+```{r numeric-distributions}
+ggplot(Questionnaire, aes(x = `Distance to Grocery Store (miles)`)) +
+  geom_histogram(bins = 15, fill = "lightgreen", color = "white") +
+  labs(
+    title = "Distance to Primary Grocery Location",
+    x = "Miles",
+    y = "Number of respondents"
+  ) +
+  theme_minimal()
+
+ggplot(Questionnaire, aes(x = `Percent of Paycheck Spent on Groceries`)) +
+  geom_histogram(bins = 15, fill = "lightcoral", color = "white") +
+  labs(
+    title = "Percent of Paycheck Spent on Groceries",
+    x = "Percent of paycheck",
+    y = "Number of respondents"
+  ) +
+  theme_minimal()
+```
+
+```{r grocery-spending-by-food-problem}
+ggplot(Questionnaire, aes(x = `Is Food a Problem?`, y = `Percent of Paycheck Spent on Groceries`, fill = `Is Food a Problem?`)) +
+  geom_boxplot(show.legend = FALSE) +
+  labs(
+    title = "Grocery Spending Burden by Food Access Concern",
+    x = "Is food a problem?",
+    y = "Percent of paycheck spent on groceries"
+  ) +
+  theme_minimal()
+```
+
+# Modeling Data Preparation
+
+The logistic regression model used a cleaned version of the questionnaire. Observations with missing modeling variables were removed, and the response variable was converted into a binary outcome.
+
+```{r modeling-data}
+RQuestionnaire <- Questionnaire %>%
+  select(-any_of(c("REG_ID", "PersonID"))) %>%
+  drop_na() %>%
+  filter(`Is Food a Problem?` != "Prefer not to say") %>%
+  filter(`Is Food a Problem?` != "Perfer not to say") %>%
+  filter(Gender != "Non-Binary") %>%
+  mutate(
+    food_problem_binary = ifelse(`Is Food a Problem?` == "Yes", 1, 0),
+    food_problem_factor = factor(food_problem_binary, levels = c(0, 1)),
+    Gender = factor(Gender),
+    Age = factor(Age),
+    Cluster = factor(Cluster),
+    `Number of Cars` = factor(`Number of Cars`),
+    `Household Size` = factor(`Household Size`)
+  )
+
+cat("Modeling observations:", nrow(RQuestionnaire), "\n")
+```
+
+Logistic regression does not require predictors to be normally distributed. Still, checking the distributions is useful because it helps us understand skewness, outliers, and how respondents answered the numeric questions.
+
+```{r normality-checks}
+shapiro_distance <- shapiro.test(RQuestionnaire$`Distance to Grocery Store (miles)`)
+shapiro_grocery <- shapiro.test(RQuestionnaire$`Percent of Paycheck Spent on Groceries`)
+
+normality_table <- tibble(
+  variable = c("Distance to Grocery Store (miles)", "Percent of Paycheck Spent on Groceries"),
+  shapiro_w = c(shapiro_distance$statistic, shapiro_grocery$statistic),
+  p_value = c(shapiro_distance$p.value, shapiro_grocery$p.value)
+)
+
+kable(normality_table, digits = 4)
+```
+
+# Logistic Regression Model
+
+The logistic regression model estimates whether respondents reported food as a problem based on grocery spending burden, gender, age, cluster, number of cars, household size, and distance to the grocery store.
+
+```{r logistic-model}
+model <- glm(
+  food_problem_factor ~ `Percent of Paycheck Spent on Groceries` + Gender + Age + Cluster +
+    `Number of Cars` + `Household Size` + `Distance to Grocery Store (miles)`,
+  data = RQuestionnaire,
+  family = binomial
+)
+
+summary(model)
+```
+
+```{r odds-ratios}
+odds_ratios <- exp(cbind(OR = coef(model), confint(model)))
+kable(as.data.frame(odds_ratios), digits = 3)
+```
+
+The model suggests that food access concerns are connected to several practical barriers. In particular, distance to grocery stores, household size, car access, and selected cluster membership appear to be important variables in the model. These findings make sense in context: food access is not only about whether food exists nearby, but also whether a household can afford it, reach it, and manage those needs with the resources available.
+
+Because this was an original field survey with a modest sample size, the model should be interpreted cautiously. Some odds ratios are large, and their confidence intervals can be wide, which suggests uncertainty. Even so, the direction of the results supports the larger project idea: transportation, distance, and household constraints are meaningful pieces of food insecurity.
+
+```{r vif-check}
+vif_values <- vif(model)
+vif_values
+```
+
+The VIF results help check whether predictors are highly redundant. In this model, the VIF values were not high enough to suggest major multicollinearity problems.
+
+# Model Performance
+
+```{r model-performance}
+predictions <- predict(model, type = "response")
+predicted_class <- ifelse(predictions > 0.5, 1, 0)
+actual_class <- as.numeric(as.character(RQuestionnaire$food_problem_factor))
+
+confusion_matrix <- table(Predicted = predicted_class, Actual = actual_class)
+confusion_matrix
+
+accuracy <- mean(predicted_class == actual_class)
+cat("Accuracy:", round(accuracy, 4), "\n")
+```
+
+```{r roc-auc}
+if (has_pROC) {
+  roc_curve <- pROC::roc(actual_class, predictions, quiet = TRUE)
+  plot(roc_curve, main = "ROC Curve for Logistic Regression Model")
+  cat("AUC:", round(as.numeric(pROC::auc(roc_curve)), 4), "\n")
+} else {
+  cat("Package 'pROC' is not installed, so ROC/AUC output is skipped.\n")
+}
+```
+
+The confusion matrix and AUC help evaluate how well the model distinguishes between respondents who did and did not report food as a problem. These results are useful, but they should not be treated as the final word because the sample was relatively small and collected under real-world field constraints. The model is best understood as an exploratory tool rather than a fully validated prediction system.
+
+# Methodological Limitations
+
+This process had several limitations. First, the target sample sizes calculated from the cluster populations were larger than what could realistically be collected during the project period. Second, the survey depended on people being available and willing to respond at selected field locations. This introduces possible nonresponse bias.
+
+Third, some survey questions were difficult to measure precisely through self-reporting. For example, respondents may estimate distance to a grocery store differently, and the phrase "affordable, fresh food" may mean different things to different people. These limitations do not make the survey unusable, but they do affect how confidently the results can be generalized.
+
+Finally, the survey data reflects perceptions of food access rather than a complete objective measure of food insecurity. That distinction is important. Perception still matters, especially for policy and lived experience, but future work could strengthen the analysis by combining survey responses with grocery prices, measured distances, food pantry locations, and neighborhood-level indicators.
+
+# Works Cited
+
+- ACS boundaries for the DC Area: https://adopt-a-block-dcgis.hub.arcgis.com/datasets/DCGIS::acs-5-year-economic-characteristics-dc-census-tract/explore
+- Bus routes and stops in the DC area: https://opendata.dc.gov/datasets/e85b5321a5a84ff9af56fd614dab81b3_53/explore
+- Grocery stores in the DC area: https://opendata.dc.gov/datasets/grocery-store-locations/explore
