@@ -1,0 +1,1242 @@
+---
+title: "Australian Weather Patterns Over Five Years - Revised"
+subtitle: Kennedy Rodriguez
+date: "2023-12-06"
+output:
+  html_document:
+    code_folding: hide
+    number_sections: true
+    toc: true
+    toc_float: true
+    code_download: true
+    theme: united
+    df_print: kable
+  pdf_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+
+
+library(skimr)
+library(gtsummary)
+library(tidyverse)
+library(DT)
+library(patchwork)
+library(ggthemes)
+library(plotly)
+library(gapminder)
+library(scales)
+library(purrr)
+library(formattable)
+library(lubridate)
+library(ggplot2)
+library(gridExtra)
+library(cowplot)
+library(reshape2)
+library(corrplot)
+library(heatmaply)
+library(dendextend)
+library(png)
+library(grid)
+library(crayon)
+library(summarytools)
+
+```
+
+
+```{r}
+website <- "https://www.kaggle.com/datasets/jsphyg/weather-dataset-rattle-package/data"
+```
+
+
+
+
+# Introduction
+
+
+## Author Context
+
+"Predict next-day rain by training classification models on the target variable RainTomorrow.
+
+This dataset contains about 10 years of daily weather observations from many locations across Australia."
+<p align="center">
+  [Joe Young](r website)
+</p>
+
+
+## Executive Summary
+
+This project analyzes daily weather observations across Australia to better understand how rainfall, wind direction, temperature, evaporation, and sunshine vary by region. The original dataset was designed for predicting next-day rain, but for this project we shifted the focus toward exploratory data visualization and regional weather patterns.
+
+The main question guiding the analysis is:
+
+**How do Australia’s regional climate differences affect when and where rainfall occurs?**
+
+Using R, interactive tables, exploratory visualizations, missing value analysis, correlation analysis, and a simple rainfall model, we looked for patterns that could help explain why some regions experience more rainfall than others.
+
+## Project Goals
+
+- Explore regional differences in rainfall, temperature, wind, sunshine, and evaporation.
+- Identify variables that appear most related to rainfall.
+- Clean and prepare a large weather dataset with missing values.
+- Build clear visualizations that communicate weather patterns to a general audience.
+- Add a simple statistical model to support the exploratory findings.
+
+
+## Variable Descriptions
+
+
+- **Date**: The date of observation
+
+ - **Location**: The common name of the location of the weather station
+ 
+ - **MinTemp**: The minimum temperature in degrees Celsius
+ 
+ - **MaxTemp**: The maximum temperature in degrees Celsius
+ 
+ - **Rainfall**: The amount of rainfall recorded for the day in mm
+ 
+ - **Evaporation**: The so-called Class A pan evaporation (mm) in the 24
+ hours to 9am
+ 
+ - **Sunshine**: The number of hours of bright sunshine in the day.
+ 
+ - **WindGustDir**: The direction of the strongest wind gust in the 24
+ hours to midnight
+ 
+ - **WindGustSpeed**: The speed (km/h) of the strongest wind gust in the
+ 24 hours to midnight
+ 
+ - **WindDir9am**: Direction of the wind at 9am
+ 
+ - **WindDir3pm**: Direction of the wind at 3pm
+ 
+ - **WindSpeed9am**: Wind speed (km/hr) averaged over 10 minutes prior to
+ 9am
+ 
+ - **WindSpeed3pm**: Wind speed (km/hr) averaged over 10 minutes prior to
+ 3pm
+ 
+ - **Humidity9am**: Humidity (percent) at 9am
+ 
+ - **Humidity3pm**: Humidity (percent) at 3pm
+ 
+ - **Pressure9am**: Atmospheric pressure (hpa) reduced to mean sea level
+ at 9am
+ 
+ - **Pressure3pm**: Atmospheric pressure (hpa) reduced to mean sea level
+ at 3pm
+ 
+ - **Cloud9am**: Fraction of sky obscured by cloud at 9am. This is
+    measured in "oktas", which are a unit of eigths. It records how many
+    eigths of the sky are obscured by cloud. Ameasure indicates completely
+    clear sky whilst an 8 indicates that it is completely overcast.
+ 
+ - **Cloud3pm**: Fraction of sky obscured by cloud (in "oktas": eighths)
+ at 3pm. See Cload9am for a description of the values
+ 
+ - **Temp9am**: Temperature (degrees C) at 9am
+ 
+ - **Temp3pm**: Temperature (degrees C) at 3pm
+ 
+ - **RainToday**: Boolean: 1 if precipitation (mm) in the 24 hours to 9am
+ exceeds 1mm, otherwise 0
+ 
+ - **RainTomorrow**: The amount of next day rain in mm. Used to create response variable RainTomorrow. A kind of measure of the "risk"
+
+
+
+
+## Dataset Overview
+
+The dataset is large horizontally, so the preview below is split into three smaller interactive tables. This makes the variables easier to inspect without overwhelming the report.
+
+**The dataset begins with 24 original variables, plus date-based variables created later for year, month, and day.**
+```{r}
+Weather <- read.csv("weatherAUS.csv")
+
+
+WeatherFirst20 <-
+  head(Weather, n = 30)
+
+table1 <- datatable(WeatherFirst20[, c("Location","Date","WindSpeed3pm", "Humidity9am", "Humidity3pm", "Pressure9am", "Pressure3pm", "Cloud9am", "Cloud3pm")],
+                    rownames = FALSE, 
+                    filter="top",
+                    options = list(pageLength = 10,
+                                   scroll = T))
+
+table2 <- datatable(WeatherFirst20[, c("Location","Date","Temp9am","Temp3pm", "RainToday", "RainTomorrow", "MinTemp", "MaxTemp", "Rainfall" )],
+                    rownames = FALSE, 
+                    filter="top",
+                    options = list(pageLength = 10,
+                                   scroll = T))
+
+
+table3 <- datatable(WeatherFirst20[, c("Location", "Date","Evaporation", "Sunshine", "WindGustDir", "WindGustSpeed", "WindDir9am", "WindDir3pm", "WindSpeed9am")],
+                    rownames = FALSE, 
+                    filter="top",
+                    options = list(pageLength = 10,
+                                   scroll = T))
+table1
+table2
+table3
+
+```
+
+
+
+## Minimum Requirements Check via Skim summary
+
+
+- **At least 10 Variables and 100 Observations**
+
+- **Containing quantitative as well as categorical variables**
+
+- **Containing Missing values**
+
+
+```{r}
+# Rows and Column check
+dims <- dim(Weather)
+
+cat(crayon::bold(crayon::blue("There are", dims[1], "rows and", dims[2], "columns on the Weather Data Frame \n \n")))
+
+# Data Type Check
+WeatherTypes <- 
+  data.frame(
+    Variables = variable.names(Weather),
+    Data_Type = sapply(Weather, class)) 
+# WeatherTypes
+
+datatable(
+  WeatherTypes,
+  rownames = FALSE,
+  filter = "top",
+  options = list(pageLength = 10,
+                 scroll = T,
+                 title = "Weather variables data types")
+)
+```
+
+**This confirms that the dataset includes both quantitative and categorical variables, which makes it suitable for exploratory visualization and comparison across groups.**
+
+## Missing Values per Variable
+```{r}
+# Function to analyze missing values in a data frame
+analyze_missing_values <- function(data) {
+  # Getting column names with missing values
+  columns_with_missing <- colnames(data)
+  columns_with_missing <- columns_with_missing[any(is.na(data))]
+
+  # Initializing a vector to store missing value sums for each column
+  missing_sums <- numeric(length(columns_with_missing))
+  
+cat(crayon::bold(crayon::blue("Variables with missing values, total: \n \n")))
+  # Looping through each column
+  for (col in columns_with_missing) {
+    # Calculating the sum of missing values for the current column
+    missing_sum <- sum(is.na(data[[col]]))
+    
+    # Printing column name and missing value sum only if there are missing values
+    if (missing_sum > 0) {
+    
+      cat("Variable:", col, ", Missing Values:", missing_sum, "\n")
+    }
+    
+    missing_sums <- missing_sum
+  }
+  
+  return(missing_sums)
+}
+
+
+analyze_missing_values(Weather)
+```
+
+**This dataset contains a meaningful amount of missing data, so missing value handling is an important part of the analysis rather than something to ignore.**
+
+### Creating Day, Month, and Year from Date
+```{r}
+#MUST RUN AS A HEAD, DATATABLE IS NOT GOOD WITH BIG DATASETS, I TRIED :(
+#Year = as.numeric(format(Date, "%Y"))
+# Convert Date to Date type
+Weather$Date <- as.Date(Weather$Date)
+
+# Create new columns for year, month, and day
+Weather$Year <- lubridate::year(Weather$Date)
+Weather$Month <- lubridate::month(Weather$Date, label = TRUE)
+Weather$Day <- lubridate::day(Weather$Date)
+
+# Convert Year, Month, and Day to numeric
+Weather$Year <- as.numeric(Weather$Year)
+Weather$Day <- as.numeric(Weather$Day)
+```
+
+
+**Month and year were created from the date variable so that weather patterns could be analyzed seasonally and over time.**
+
+# Data Frame Inspection
+
+**Weather df Summary Using Skim**
+``` {r}
+Weather <- Weather[-1, ] 
+Weather <- subset(Weather, !(rownames(Weather) == 1))
+
+suppressWarnings({
+  skim(Weather)
+})
+
+```
+
+**Categoricals**
+
+- Observations from 3436 unique dates
+
+- 49 different regions in Australia
+
+- 2 Possible answers for RainToday and RainTomorrow
+
+- 16 Unique consistent directions for WindGustDir, WindDir9am, and WindDir3pm
+
+
+**Quantatives**
+
+ - Evaporation, Sunshine, Cloud3am, and Cloud9am have the lowest completion
+ - Different units across the board
+ 
+ 
+
+### Data Obtained per location
+```{r}
+# All locations
+region_count <- table(Weather$Location) #table of counts for each unique value
+
+# Percentage of observations 
+region_perc <- round((region_count / nrow(Weather)) * 100, 3)
+
+
+region_data <- data.frame(Location = names(region_perc), Percentage = as.numeric(region_perc))
+
+
+datatable(region_data, 
+          rownames = FALSE, 
+          filter="top", 
+          options = list(pageLength = 10, 
+                         scrollX = TRUE, 
+                         dom = 'Bfrtip',
+                         buttons = 'colvis'))
+```
+ **Some Places have more data inputs than others, some places such as Katerine and nhil and Uluru have only 1.08% of input**
+
+**The rest are more even, between 2.06% and 2.36% with Canberra and Sydney being especially high**
+
+
+### Data Obtained per Year
+```{r}
+Year_count <- table(Weather$Year) # table of counts for each unique value
+
+# Percentage of observations
+Year_perc <- round((Year_count / nrow(Weather)) * 100, 2)
+
+
+Year_data <- data.frame(
+  Year = names(Year_perc),
+  Percentage = as.numeric(Year_perc)
+)
+
+# Bar chart instead of a pie chart for easier comparison
+Year_chart <- ggplot(Year_data, aes(x = Year, y = Percentage)) +
+  geom_col(fill = "steelblue") +
+  labs(title = "Percentage of Observations by Year",
+       x = "Year",
+       y = "Percentage of Observations") +
+  theme_minimal()
+
+ggplotly(Year_chart)
+```
+**Lowest percentages relates to the start and end of the dataframe**
+
+
+### Data Obtained per Wind Direction
+```{r}
+## All Direction
+WindGust_count <- table(Weather$WindGustDir) # table of counts for each unique value
+
+# Percentage of observations
+WindGust_perc <- round((WindGust_count / nrow(Weather)) * 100, 2)
+
+# Converting for datatable
+WindGust_data <- data.frame(
+  WindGustDir = names(WindGust_perc),
+  Percentage = as.numeric(WindGust_perc)
+)
+
+# Used to be a pie chart but now its a bar chart for clearer ranking
+WindGust_chart <- ggplot(WindGust_data, aes(x = reorder(WindGustDir, Percentage), y = Percentage)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(title = "Wind Gust Direction Distribution",
+       x = "Wind Gust Direction",
+       y = "Percentage of Observations") +
+  theme_minimal()
+
+ggplotly(WindGust_chart)
+```
+
+
+**None of them, the 16 directions, is a clear predomidant wind direction. Need to check if it still holds per location** 
+
+### RainTomorrow, RainToday, Distribution
+```{r}
+
+# Filtering out Missing values in RainTomorrow and RainToday
+Weather_TodayFiltered <- na.omit(Weather[c("RainToday")])
+Weather_TomorrowFiltered <- na.omit(Weather[c("RainTomorrow")])
+
+
+# Distribution for RainTomorrow
+RainTomorrowGraph <- 
+  ggplot(data = Weather_TomorrowFiltered, aes(x = RainTomorrow, fill = RainTomorrow)) +
+  geom_bar(stat = "count", position = "dodge") +
+  geom_text(stat = "count", aes(label = after_stat(count)), position = position_dodge(width = 0.9), vjust = 0.5) +
+  labs(title = "Bar Graph of RainTomorrow", x = "RainTomorrow", y = "Count")
+
+# Distribution for RainToday
+RainTodayGraph <- 
+  ggplot(data = Weather_TodayFiltered, aes(x = RainToday, fill = RainToday)) +
+  geom_bar(stat = "count", position = "dodge") +
+  geom_text(stat = "count", aes(label = after_stat(count)), position = position_dodge(width = 0.8), vjust = -0.4) +
+  labs(title = "Bar Graph of RainToday", x = "RainToday", y = "Count")
+
+ggplotly(RainTomorrowGraph)
+ggplotly(RainTodayGraph)
+
+
+```
+**RainTomorrow is closely aligned with RainToday, but rain is still not the most frequent outcome in the dataset. This matters because rainfall events are unevenly distributed across both time and region.**
+
+
+### In regards to the Distribution of Data throught time
+```{r}
+
+# Weather$Date <- as.Date(Weather$Date) #Converting it into the as.Date
+
+Overtime <- 
+  ggplot(Weather, aes(x = Date)) +
+  geom_histogram(bins = 120, fill = "skyblue", color = "white") +
+  scale_x_date(labels = date_format("%Y-%m"), date_breaks = "3 months") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(title = 'Number of observations over time', 
+       x = 'Date', 
+       y = 'Number of observations') +
+  theme(plot.title = element_text(size = 18), axis.title.x = element_text(size = 15), axis.title.y = element_text(size = 15))
+
+ggplotly(Overtime)
+
+
+```
+
+**The number of observations changes over time, especially around the early and later years of the dataset. This is important because uneven data coverage can affect trends if it is not considered during interpretation.**
+
+
+# Dealing with Missing Values
+
+
+## Observing how missing values distribute by Variable
+```{r}
+# function to calculate missing percentages
+miss_perc <- function(var_type) {
+  Weather %>%
+    select_if(var_type) %>%
+    summarise_all(~ mean(is.na(.)) * 100) %>%
+    pivot_longer(cols = everything(), names_to = "Variable", values_to = "Percentage") %>%
+    arrange(desc(Percentage))
+}
+
+# Missing percentages for numerical variables
+num_miss_perc <- miss_perc(is.numeric)
+
+# Missing percentages for categorical variables
+cat_miss_perc <- miss_perc(is.character)
+
+
+cat(crayon::bold(crayon::blue("Percentage of missing values for numerical variables:\n")))
+datatable(num_miss_perc,
+          rownames = TRUE,
+          filter = "top",
+          options = list(pageLength = 10, 
+                         scrollX = TRUE))
+cat(crayon::bold(crayon::blue("Percentage of missing values for categorical variables:\n")))
+datatable(cat_miss_perc,
+          rownames = TRUE,
+          filter = "top",
+          options = list(pageLength = 10, 
+                         scrollX = TRUE))
+
+```
+
+**Sunshine, Evaporation, Cloud9am, and Cloud3pm have noticeable missingness. I still kept some of these variables in the analysis because they are meaningful weather indicators, but the missingness should be considered when interpreting results.**
+
+## Observing How missing values distribute by Year
+```{r}
+# Total number of missing values by year
+total_na_by_year <- function() {
+  Weather %>%
+    mutate(Total_NAs = rowSums(is.na(.))) %>%
+    group_by(Year) %>%
+    summarise(Total_NAs = sum(Total_NAs))
+}
+
+# total number of missing values for all variables by year
+total_na_by_year_result <- tryCatch(
+  total_na_by_year(),
+  error = function(e) {
+    return(data.frame())
+  }
+)
+
+
+cat(crayon::bold(crayon::blue("Total number of missing values for all variables by year:\n")))
+total_na_by_year_result
+
+# datatable(miss_perc_by_year, rownames = FALSE, filter="top", options = list(pageLength = 10, scrollX = TRUE, dom = 'Bfrtip', buttons = 'colvis'))
+```
+
+
+**Missing values increase in later years, which also appear to have more observations overall. Because of this, I narrowed the time period to make the analysis more manageable and consistent.**
+
+
+## Taking out all observations before 2012
+```{r}
+Weather_Neat <- Weather %>%
+  filter(as.numeric(substr(Date, 1, 4)) < 2012)
+
+# Percentage of deleted data
+percentage_deleted <- ((nrow(Weather) - nrow(Weather_Neat)) / nrow(Weather)) * 100
+
+cat(crayon::bold(crayon::blue("Deleted all observations after 2012. Percentage of deleted data: ", sprintf("%.2f%%", percentage_deleted), "\n")))
+
+```
+
+**The dataset was narrowed to focus the analysis and reduce the effect of uneven data coverage across the full timeline.**
+
+## Taking out observations with missing values for Rainfall, RainToday, and RainTomorrow
+```{r}
+Weather_clean <- Weather_Neat[complete.cases(Weather_Neat[c("Rainfall", "RainToday", "RainTomorrow")]),]
+
+# Calculate the percentage of deleted data
+percentage_deleted <- ((nrow(Weather_Neat) - nrow(Weather_clean)) / nrow(Weather_Neat)) * 100
+
+cat(crayon::bold(crayon::blue("Deleted all observations after 2012. Percentage of deleted data: ", sprintf("%.2f%%", percentage_deleted), "\n")))
+
+```
+
+### Some Variables have conditions, checking if they meet them
+
+**RainToday is supposed to be marked “Yes” when rainfall is at least 1mm, so I checked whether the variable matched that condition.**
+
+```{r}
+
+# Filteringout missing values
+Weather_filtered <- na.omit(Weather_clean[c("Rainfall", "RainToday")])
+
+# RainToday ondition
+condition <- (Weather_filtered$Rainfall >= 1 & Weather_filtered$RainToday == "Yes") |
+              (Weather_filtered$Rainfall < 1 & Weather_filtered$RainToday == "No")
+
+# Count satisfying and non-satisfying rows 
+count_true <- sum(condition)
+count_false <- nrow(Weather_filtered) - count_true
+
+cat(crayon::bold(crayon::blue("Number of rows satisfying the condition:", count_true, "\n")))
+
+cat(crayon::bold(crayon::blue("Number of rows not satisfying the condition:", count_false, "\n")))
+```
+
+### Correcting RainToday Based on the Rainfall Condition
+```{r}
+# Updating 'RainToday' based on condition
+Weather_clean$RainToday[!(condition)] <- 'Yes'
+
+# Condition
+condition <- (Weather_clean$Rainfall >= 1 & Weather_clean$RainToday == 'Yes') |
+              (Weather_clean$Rainfall < 1 & Weather_clean$RainToday == 'No')
+
+# New number of satisfying rows
+count_true <- sum(condition)
+count_false <- nrow(Weather_clean) - count_true
+
+cat(crayon::bold(crayon::blue("Number of rows satisfying the condition:", count_true, "\n")))
+
+cat(crayon::bold(crayon::blue("Number of rows not satisfying the condition:", count_false, "\n")))
+
+```
+## Replacing Missing Values with Medians and Modes
+```{r}
+
+#This was a nightmare, there was a simpler way, group_by refused to recognize Month as a column, complicating things
+
+cat(crayon::bold(crayon::blue("\n \n Missing Values Before: \n \n")))
+analyze_missing_values(Weather_clean)
+
+
+# Retrieving Numeric and Categorical Columns
+numeric_cols <- names(Weather_clean)[sapply(Weather_clean, function(x) is.numeric(x))]
+categorical_cols <- names(Weather_clean)[sapply(Weather_clean, function(x) is.factor(x) | is.character(x))]
+
+
+
+# Grouping by Month and Region, then calculating the median for each numeric column
+monthly_region_median <- aggregate(. ~ Month + Location, data = Weather_clean[, c("Month", "Location", numeric_cols)], median)
+
+
+
+# Grouping by Month and Region, then calculating the mode for each categorical column
+monthly_region_mode <- aggregate(. ~ Month + Location, data = Weather_clean[, c("Month", "Location", categorical_cols)], function(x) {
+  mode_value <- names(table(x))[which.max(table(x))]
+  if (length(mode_value) > 0) {
+    return(mode_value)
+  } else {
+    return(NA)
+  }
+})
+
+
+# Handling Missing Values: Fill with median for numeric and a default category for categorical
+monthly_region_median[is.na(monthly_region_median)] <- apply(monthly_region_median[is.na(monthly_region_median), ], 2, function(x) median(x, na.rm = TRUE))
+monthly_region_mode[is.na(monthly_region_mode)] <- "Unknown"
+
+# Merging back the filled values to the original data frame
+Weather_clean <- merge(Weather_clean, monthly_region_median, by = c("Month", "Location"), suffixes = c("", ".median"))
+Weather_clean <- merge(Weather_clean, monthly_region_mode, by = c("Month", "Location"), suffixes = c("", ".mode"))
+
+
+# Replacing missing values with medians
+for (col in numeric_cols) {
+  Weather_clean[[col]] <- ifelse(is.na(Weather_clean[[col]]), Weather_clean[[paste0(col, ".median")]], Weather_clean[[col]])
+}
+
+# Replacing missing values with modes
+for (col in categorical_cols) {
+  Weather_clean[[col]] <- ifelse(is.na(Weather_clean[[col]]), Weather_clean[[paste0(col, ".mode")]], Weather_clean[[col]])
+}
+
+
+
+# Keep columns at index 1 and 27
+columns_to_keep <- c(1:27)
+Weather_clean <- Weather_clean[, columns_to_keep]
+
+cat(crayon::bold(crayon::blue("\n \n Missing Values After: \n \n")))
+analyze_missing_values(Weather_clean)
+
+```
+
+# Working with Outliers
+
+```{r}
+# Identifying numeric columns
+numeric_cols <- sapply(Weather_clean, is.numeric)
+
+# Defining columns to exclude
+columns_to_exclude <- c('Day', 'Month', 'Year')
+
+# Subseting numeric columns excluding specified ones
+numeric_cols_outlier <- names(numeric_cols)[numeric_cols & !(names(numeric_cols) %in% columns_to_exclude)]
+
+```
+
+## Observing Outlier
+
+### Boxplot Review of Numeric Variables
+**removed in later revisions, just don't**
+```{r}
+# # Creating a list to store individual plots
+# plots_list <- vector("list", length = length(numeric_cols_outlier))
+# 
+# # Create boxplot for each numeric column
+# for (i in seq_along(numeric_cols_outlier)) {
+#   plots_list[[i]] <- ggplot(Weather_clean, aes(x = 1, y = !!sym(numeric_cols_outlier[i]))) +
+#     geom_boxplot() +
+#     labs(title = paste("Box Plot of", numeric_cols_outlier[i]),
+#          x = NULL, y = "Values") +
+#     theme_economist() +
+#     theme(axis.text.x = element_blank(),
+#           axis.title.x = element_blank(),
+#           axis.ticks.x = element_blank())
+# }
+# 
+# 
+# lapply(plots_list, function(p) ggplotly(p))
+
+
+```
+
+### Histogram Review of Numeric Variables
+**Again, just don't**
+```{r}
+# # Creating a list to store individual plots
+# hist_plots_list <- list()
+# 
+# # Create histograms for each numeric column
+# for (col in numeric_cols_outlier) {
+#   plot <- ggplot(Weather_clean, aes(x = !!sym(col))) +
+#     geom_histogram(binwidth = 1, fill = "lightgreen", color = "white", alpha = 0.7) +
+#     labs(title = paste("Histogram of", col), x = "Values", y = "Frequency") +
+#     theme_minimal()
+#   
+#   hist_plots_list[[col]] <- ggplotly(plot)
+# }
+# hist_plots_list
+
+```
+
+
+## Deleting outliers
+
+### Current Outlier Count
+
+```{r}
+identify_outliers_count <- function(df) {
+  # Initialize a data frame to store outlier counts for each column
+  outlier_counts <- data.frame(Column = character(), OutlierCount = numeric(), stringsAsFactors = FALSE)
+
+  # Loop through each numeric column in the data frame
+  for (col in names(df)) {
+    if (is.numeric(df[[col]])) {
+      # Extract the column as a numeric vector
+      column_data <- df[[col]]
+      
+      # interquartile range (IQR), upper and lower bounds 
+      Q1 <- quantile(column_data, 0.25)
+      Q3 <- quantile(column_data, 0.75)
+      IQR <- Q3 - Q1
+      lower_bound <- Q1 - 1.5 * IQR
+      upper_bound <- Q3 + 1.5 * IQR
+      
+      # Identify outliers for the current column
+      outliers <- column_data[column_data < lower_bound | column_data > upper_bound]
+      
+      # Store the outlier count in the data frame
+      outlier_count <- length(outliers)
+      
+      # Only add to the data frame if there are outliers
+      if (outlier_count > 0) {
+        outlier_counts <- rbind(outlier_counts, data.frame(Column = col, OutlierCount = outlier_count))
+      }
+    }
+  }
+
+  return(outlier_counts)
+}
+
+identify_outliers_count(Weather_clean)
+
+```
+
+
+
+### Outliers After Deletion Process
+```{r}
+remove_outliers <- function(data, outlier_threshold = 1.5) {
+  numeric_cols <- sapply(data, is.numeric)
+  
+  # Iterate over each numeric column in the dataset
+  for (col in names(data)[numeric_cols]) {
+    # Calculate the IQR for the current column, excluding missing values
+    col_iqr <- IQR(data[[col]], na.rm = TRUE)
+    
+    # Define the upper and lower bounds for outliers
+    upper_bound <- quantile(data[[col]], 0.75, na.rm = TRUE) + outlier_threshold * col_iqr
+    lower_bound <- quantile(data[[col]], 0.25, na.rm = TRUE) - outlier_threshold * col_iqr
+    
+    # Identify and remove outliers, considering missing values
+    outliers <- data[[col]] > upper_bound | data[[col]] < lower_bound
+    data <- data[!outliers, ]
+  }
+  
+  # Return the cleaned dataset
+  return(data)
+}
+
+Weather_clean <- remove_outliers(Weather_clean)
+```
+
+
+**Some extreme values were removed using an IQR-based outlier rule. Because the dataset is large, this helped reduce the influence of unusual values while still keeping enough observations for analysis.**
+
+```{r}
+identify_outliers_count(Weather_clean)
+```
+ 
+
+ 
+ 
+# Exploratory Data Analysis
+
+## Correlations
+```{r}
+# numeric_cols is a logical vector indicating numeric columns
+numeric_data <- Weather_clean[, numeric_cols]
+
+# Calculation of the correlation matrix for numerical variables
+corr_matrix <- cor(numeric_data)
+
+# Extracting the correlation values for "Rainfall" and sorting in descending order
+correlation_with_rainfall <- sort(corr_matrix["Rainfall", ], decreasing = TRUE)
+
+cat(crayon::bold(crayon::blue(" \n \n Correlation Between Variables and Rainfall \n \n")))
+#corr_matrix
+correlation_with_rainfall
+```
+
+
+### Heat Map of Variables
+```{r}
+cat(crayon::bold(crayon::blue(" \n \n Correlatios Between Variables Visualized \n \n")))
+dend <- as.dendrogram(hclust(as.dist(1 - abs(corr_matrix))))
+
+# Plot an interactive heatmap using heatmaply
+heatmaply(as.matrix(corr_matrix),
+          col = colorRampPalette(c("blue", "white", "red"))(100),
+          Rowv = dend,
+          Colv = dend,
+          main = "Interactive Correlation Heatmap"
+)
+```
+
+
+**The strongest relationships generally followed what we would expect: rainfall tended to move differently from sunshine and evaporation, while temperature-related variables were closely related to each other.**
+
+## Simple Rainfall Model
+
+To add a statistical layer to the visual analysis, I also fit a simple linear regression model using several weather variables that are logically connected to rainfall. This is not meant to be a perfect prediction model, but it helps support the exploratory findings with a more formal comparison.
+
+```{r}
+rainfall_model_data <- Weather_clean %>%
+  select(Rainfall, MaxTemp, MinTemp, Sunshine, Evaporation, Humidity9am, Humidity3pm, WindGustSpeed) %>%
+  drop_na()
+
+rainfall_model <- lm(Rainfall ~ MaxTemp + MinTemp + Sunshine + Evaporation + Humidity9am + Humidity3pm + WindGustSpeed,
+                     data = rainfall_model_data)
+
+summary(rainfall_model)
+```
+
+**This model gives another way to compare the variables after cleaning the data. I would not treat it as a final forecasting model, but it is useful for seeing which variables still matter when they are considered together.**
+
+## Wind Direction
+
+
+### Strongest Wind Direction by Time of Day
+```{r}
+
+# New variable indicating whether 9 am or 3 pm had the strongest wind, the same or other
+Weather$StrongestWindTime <- ifelse(Weather$WindGustDir == Weather$WindDir9am & Weather$WindGustDir == Weather$WindDir3pm, "Both 9am and 3pm",
+                                    ifelse(Weather$WindGustDir == Weather$WindDir9am & Weather$WindGustDir != Weather$WindDir3pm, "9am",
+                                           ifelse(Weather$WindGustDir != Weather$WindDir9am & Weather$WindGustDir == Weather$WindDir3pm, "3pm",
+                                                  "Other")))
+
+# Percentage of observations for each
+strongest_wind_perc <- table(Weather$StrongestWindTime) / nrow(Weather) * 100
+
+# Data frame for plotting
+wind_data <- data.frame(Time = names(strongest_wind_perc), Percentage = as.numeric(strongest_wind_perc),
+                        Count = as.numeric(table(Weather$StrongestWindTime)))
+
+ThreeAndNine <- 
+  ggplot(wind_data, aes(x = Time, y = Percentage, fill = Time)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = Count), position = position_stack(vjust = 0.5), size = 3) +
+  labs(title = "Percentage of Strongest Wind Direction by Time",
+       x = "Time",
+       y = "Percentage") 
+
+ggplotly(ThreeAndNine)
+```
+
+
+**This suggests that the strongest wind gust direction does not always match the wind direction recorded at 9am or 3pm. Only part of the overall wind behavior is captured by those two daily snapshots.**
+
+```{r}
+# Calculating totals
+ThreePmTotal <- sum(Weather$WindGustDir != Weather$WindDir9am & Weather$WindGustDir == Weather$WindDir3pm, na.rm = TRUE)
+
+NinePmTotal <- sum(Weather$WindGustDir == Weather$WindDir9am & Weather$WindGustDir != Weather$WindDir3pm, na.rm = TRUE)
+
+SameTotal <- sum(Weather$WindGustDir == Weather$WindDir9am & Weather$WindGustDir == Weather$WindDir3pm, na.rm = TRUE)
+
+Other <- sum(Weather$WindGustDir != Weather$WindDir9am & Weather$WindGustDir != Weather$WindDir3pm, na.rm = TRUE)
+
+SumTotal <- ThreePmTotal+ NinePmTotal + SameTotal
+
+cat(crayon::bold(crayon::blue("As a matter of fact, their sum total is", SumTotal, "compared to the", Other,"from the Other category \n")))
+
+```
+
+
+### Wind Direction per Region
+```{r}
+# Function to create a pie chart for a specific location
+createPieChart <- function(location, title) {
+  # Filter data for the specified location
+  location_data <- subset(Weather_clean, Location == location)
+
+  # Table of counts for each unique value in WindGustDir
+  windGust_count <- table(location_data$WindGustDir)
+
+  # Percentage of observations
+  windGust_perc <- round((windGust_count / nrow(location_data)) * 100, 2)
+
+  # Convert for datatable
+  windGust_data <- data.frame(
+    WindGustDir = names(windGust_perc),
+    Percentage = as.numeric(windGust_perc)
+  )
+
+  # Create a pie chart using plot_ly with title
+  chart <- plot_ly(
+    labels = windGust_data$WindGustDir,
+    values = windGust_data$Percentage,
+    type = "pie",
+    textinfo = "label+percent",
+    insidetextfont = list(color = "white"),
+    hoverinfo = "label+percent",
+    title = title
+  )
+
+  # Return the chart
+  chart
+}
+
+
+createPieChart("Canberra","Wind Gust Direction in Canberra")
+
+createPieChart("Darwin", "Wind Gust Direction in Darwin")
+
+createPieChart("Woomera","Wind Gust Direction in Woomera")
+
+
+
+```
+
+
+- **Canberra** seems to have a Northwest as the predominant wind direction, by a lot, followed by East-Northeast, and absolute East. Canberra is in a mountainous region in the South of Australia.
+
+- **Darwin** has absolute East as the predominant wind direction, followed by East-Southeast. Darwin is a coastal region in the North.
+
+- **Woomera** does not have a very predominant wind directions, but the most frequent ones are Southeast, Southwest, and absolute South.Woomera being in the south of Australia with arid climate.
+
+This demonstrates a variation of strong wind directions in Australia with then not being even depending on the region. 
+
+## Rainfall
+
+
+### Rainfall by Month
+```{r}
+monthly_rainfall <- Weather_clean %>%
+  group_by(Month) %>%
+  summarise(AverageRainfall = mean(Rainfall, na.rm = TRUE))
+
+ggplot(monthly_rainfall,
+       aes(x = Month,
+           y = AverageRainfall,
+           group = 1)) +
+  geom_line(color = "steelblue") +
+  geom_point(color = "steelblue") +
+  labs(x = "Month",
+       y = "Average Rainfall",
+       title = "Average Rainfall by Month") +
+  theme_minimal()
+
+```
+
+
+**The monthly rainfall pattern gives a first look at seasonality. Rainfall does not occur evenly throughout the year, and this matters because Australia’s climate varies strongly by region.**
+
+### Rainfall by Region
+```{r}
+location_rainfall <- Weather_clean %>%
+    group_by(Location) %>%
+    summarise(TotalRainfall = sum(Rainfall, 
+                                  na.rm = TRUE),  # For total rainfall
+              AverageRainfall = mean(Rainfall, 
+                                     na.rm = TRUE)) # For average rainfall
+
+location_rainfall <- location_rainfall %>%
+    arrange(desc(AverageRainfall))  # Or replace with AverageRainfall
+
+RegionRain <- 
+  ggplot(location_rainfall, 
+       aes(x = reorder(Location, AverageRainfall), 
+           y = AverageRainfall)) +  # Or use AverageRainfall
+    geom_bar(stat = "identity", 
+             fill = "powderblue", color = "white") +
+    labs(x = "Location", 
+         y = "Average Rainfall", 
+         title = "Average Rainfall by Location in Australia") +
+    theme_minimal() +
+    coord_flip()
+
+ggplotly(RegionRain)
+
+```
+
+
+**This bar graph seems to indicate that rainfall occurs the least on places of Australia with warmer more arid climates (such a Woomera). The places favored by rain such as Nortfolk Island and Mount Gambier do not have the same climate but similar temperatures. Mount Gambier has the most rain between June to August, the time where they have the lowest temperature of the year, around 42 degrees Celsius. Nortfolk Island is more varied with its rainy months and has more rain overall but June and July have high rain fall, when the tempartures are between 58 and 59 degrees Celsius**
+
+
+### Average Max Temperature by Location
+```{r}
+location_maxtemp <- Weather_clean %>%
+    group_by(Location) %>%
+    summarise(Totalmaxtemp = sum(MaxTemp, 
+                                  na.rm = TRUE), 
+              Averagemaxtemp = mean(MaxTemp, 
+                                     na.rm = TRUE)) 
+
+location_maxtemp <- location_maxtemp %>%
+    arrange(desc(Averagemaxtemp))  
+
+Regionmaxtemp <- 
+  ggplot(location_maxtemp, 
+       aes(x = reorder(Location, Averagemaxtemp), 
+           y = Averagemaxtemp)) +  
+    geom_bar(stat = "identity", 
+             fill = "rosybrown", color = "white") +
+    labs(x = "Location", 
+         y = "Average MaxTemp", 
+         title = "Average MaxTemp by Location in Australia") +
+    theme_minimal() +
+    coord_flip()
+
+ggplotly(Regionmaxtemp)
+```
+
+**Comparing average rainfall and average maximum temperature by location suggests a partial reversal between the two. Some hotter inland locations tend to receive less rainfall, while cooler or coastal locations often receive more.**
+
+### Rainfall in Relation to Temperature in Woomera
+```{r}
+Woomera_rainfall <- Weather_clean %>%
+  filter(Location == "Woomera", Rainfall > 0 ) %>%
+  group_by(MaxTemp) %>%
+  summarise(TotalWoomeraRainfall = sum(Rainfall, na.rm = TRUE),
+            AverageWoomeraRainfall = mean(Rainfall, na.rm = TRUE)) %>%
+  arrange(desc(AverageWoomeraRainfall))
+
+WoomeraRain <- ggplot(Woomera_rainfall, 
+                     aes(x = reorder(MaxTemp, AverageWoomeraRainfall), 
+                         y = AverageWoomeraRainfall)) +
+  geom_bar(stat = "identity", 
+           fill = "mediumspringgreen", color = "white") +
+  labs(x = "Temperature", 
+       y = "Average Rainfall", 
+       title = "Average Rainfall by Temperature in Woomera") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+WoomeraRain_plotly <- ggplotly(WoomeraRain)
+WoomeraRain_plotly
+
+```
+
+**In Woomera, rainfall appears most often around moderate-to-warm maximum temperatures. Because Woomera is generally dry, even these rainfall patterns should be interpreted carefully rather than treated as a broad rule for all of Australia.**
+
+
+### Rainfall in Relation to Temperature in Mount Gambier
+```{r}
+MountGambier_rainfall <- Weather_clean %>%
+  filter(Location == "MountGambier", Rainfall > 0 ) %>%
+  group_by(MaxTemp) %>%
+  summarise(TotalMountGambierRainfall = sum(Rainfall, na.rm = TRUE),
+            AverageMountGambierRainfall = mean(Rainfall, na.rm = TRUE)) %>%
+  arrange(desc(AverageMountGambierRainfall))
+
+MountGambierRain <- ggplot(MountGambier_rainfall, 
+                     aes(x = reorder(MaxTemp, AverageMountGambierRainfall), 
+                         y = AverageMountGambierRainfall)) +
+  geom_bar(stat = "identity", 
+           fill = "chartreuse", color = "white") +
+  labs(x = "Temperature", 
+       y = "Average Rainfall", 
+       title = "Average Rainfall by Temperature in MountGambier") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1, size = 5.5))
+
+
+WoomeraRain_plotly <- ggplotly(MountGambierRain)
+WoomeraRain_plotly
+```
+
+
+**Mount Gambier shows a different pattern from Woomera. Rainfall occurs across a wider range of temperatures, with higher average rainfall often appearing around cooler maximum temperatures. This supports the idea that regional climate matters when interpreting rainfall.**
+
+## Temperature
+
+### Rainfall in Relation to Max Temperature:
+```{r}
+
+ filtered_data <- subset(Weather_clean, Rainfall > 0)
+ggplot(filtered_data, aes(x = MaxTemp, y = Rainfall)) +
+  stat_summary(fun = "mean", geom = "line") +
+  geom_point(stat = "summary", fun = "mean") +
+  labs(x = "MaxTemp", y = "Rainfall ", title = "Average Rainfall During Max Temperature") +
+  theme_minimal()
+
+```
+
+
+**There is some rainfall activity at higher temperatures, but temperature alone does not explain rainfall well across the full dataset. Region, season, humidity, sunshine, and evaporation all provide important context.**
+
+### Rainfall in relationship to Min Temperature
+```{r}
+ filtered_data <- subset(Weather_clean, Rainfall > 0)
+ggplot(filtered_data, aes(x = MinTemp, y = Rainfall)) +
+  stat_summary(fun = "mean", geom = "line") +
+  geom_point(stat = "summary", fun = "mean") +
+  labs(x = "MinTemp", y = "Rainfall ", title = "Average Rainfall During Min Temperature") +
+  theme_minimal()
+```
+
+**Rainfall at lower minimum temperatures likely reflects seasonal and regional differences, especially in southern areas where winter rainfall can be more common.**
+
+### Maximum Temperature Over Time
+```{r}
+  ggplot(Weather_clean, 
+       aes(x = Date, 
+           y = MaxTemp)) +
+  geom_line(stat = "identity", color = "tomato") +
+  labs(x = "Date", 
+       y = "Max Temperature") +
+  ggtitle("Max Temperature Over Time") +
+  theme_foundation()
+
+```
+
+**The temperature trend shows seasonal movement, but the daily-level line is noisy. A monthly average view would be better because it would make the seasonal pattern easier to read.**
+
+
+### Min Temperature Over Time
+```{r}
+  ggplot(Weather_clean, 
+       aes(x = Date, 
+           y = MinTemp)) +
+  geom_line(stat = "identity", color = "tomato") +
+  labs(x = "Date", 
+       y = "Min Temperature") +
+  ggtitle("Min Temperature Over Time") +
+  theme_foundation()
+```
+**The minimum temperature pattern follows a similar seasonal shape to maximum temperature, which is expected because both variables measure related parts of the daily temperature cycle.**
+
+### Rainfall and Sunshine:
+```{r}
+Sunshine_Rainfall <- Weather_clean %>%
+  group_by(Sunshine) %>%
+  summarise(TotalRainfall = sum(Rainfall, na.rm = TRUE),
+            AverageRainfall = mean(Rainfall, na.rm = TRUE)) %>%
+  arrange(desc(AverageRainfall))
+
+SunshineRainfall <- ggplot(Sunshine_Rainfall, 
+                              aes(x = Sunshine, 
+                                  y = AverageRainfall)) +
+  geom_point(color = "tan") +
+  labs(x = "Sunshine", 
+       y = "Average Rainfall", 
+       title = "Average Rainfall by Evaporation in Australia") +
+  theme_minimal() 
+
+SunshineRainfall_plotly <- ggplotly(SunshineRainfall)
+SunshineRainfall_plotly
+```
+
+
+**Sunshine and rainfall show the expected negative relationship: rainy days tend to have more cloud cover and fewer bright sunshine hours.**
+
+## Evaporation
+
+
+
+
+### Evaporation and Temperature
+```{r}
+  ggplot(Weather_clean,
+       aes(x = MaxTemp,
+           y = Evaporation)) +
+  geom_line(stat = "identity", color = "wheat") +
+  labs(x = "MaxTemp",
+       y = "Evaporation") +
+  ggtitle("Evaporation in Relation to Max Temperature") +
+  theme_foundation()
+```
+
+**Evaporation tends to increase as temperature increases, which makes sense physically. This also raises a useful regional question: do hotter, higher-evaporation areas receive less rainfall overall?**
+
+
+### Evaporation by Region
+```{r}
+location_Evaporation <- Weather_clean %>%
+    group_by(Location) %>%
+    summarise(TotalEvaporation = sum(Evaporation,
+                                  na.rm = TRUE),  # For total Evaporation
+              AverageEvaporation = mean(Evaporation,
+                                     na.rm = TRUE)) # For average Evaporation
+
+location_Evaporation <- location_Evaporation %>%
+    arrange(desc(AverageEvaporation))
+
+RegionEvaporation <-
+  ggplot(location_Evaporation,
+       aes(x = reorder(Location, AverageEvaporation),
+           y = AverageEvaporation)) +  # Or use AverageRainfall
+    geom_bar(stat = "identity",
+             fill = "darkolivegreen", color = "white") +
+    labs(x = "Location",
+         y = "Average Evaporation",
+         title = "Average Evaporation by Location in Australia") +
+    theme_minimal() +
+    coord_flip()
+
+ggplotly(RegionEvaporation)
+```
+
+**Arid regions tend to have higher evaporation, and the ordering of this graph appears almost opposite to the rainfall-by-location chart. This supports the idea that evaporation is connected to climate type, but it does not directly cause rainfall by itself.**
+
+### Evaporation and Rainfall
+```{r}
+Evaporation_Rainfall <- Weather_clean %>%
+  group_by(Evaporation) %>%
+  summarise(TotalRainfall = sum(Rainfall, na.rm = TRUE),
+            AverageRainfall = mean(Rainfall, na.rm = TRUE)) %>%
+  arrange(desc(AverageRainfall))
+
+EvaporationRainfall <- ggplot(Evaporation_Rainfall,
+                              aes(x = Evaporation,
+                                  y = AverageRainfall)) +
+  geom_point(color = "thistle") +
+  labs(x = "Evaporation",
+       y = "Average Rainfall",
+       title = "Average Rainfall by Evaporation in Australia") +
+  theme_minimal()
+
+EvaporationRainfall_plotly <- ggplotly(EvaporationRainfall)
+EvaporationRainfall_plotly
+
+```
+**Evaporation and rainfall appear to have a negative relationship in this analysis. This does not necessarily mean evaporation prevents rainfall; instead, it likely reflects regional and seasonal climate differences. Hotter, drier regions can have higher evaporation but lower rainfall, while cooler or coastal regions may receive more rainfall with lower evaporation.** 
+
+
+
+
+# Key Findings
+
+- Rainfall patterns vary strongly across Australia. Some locations receive much more rain than others, and the regional differences are one of the clearest parts of the analysis.
+- Wind direction is not uniform across Australia. Canberra, Darwin, and Woomera show different dominant wind directions, which reflects the diversity of Australia’s geography and climate.
+- Temperature and evaporation appear connected to regional climate. Hotter inland regions tend to show higher evaporation, while cooler or coastal regions often show higher rainfall.
+- Sunshine and evaporation both show negative relationships with rainfall in the exploratory analysis. This is consistent with the idea that rainy conditions are usually cloudier and less sunny.
+- Temperature alone does not explain rainfall well. The relationship becomes more meaningful when location, season, humidity, sunshine, and evaporation are considered together.
+
