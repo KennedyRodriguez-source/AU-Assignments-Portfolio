@@ -1,0 +1,598 @@
+---
+title: "What Drives Airbnb Guest Ratings?"
+subtitle: "Predicting Review Scores Using Listing Characteristics"
+author: "Kennedy Rodriguez"
+date: "2024-12-10"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: "hide"
+    theme: united
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r libraries}
+library(tidyverse)
+library(readr)
+library(skimr)
+library(broom)
+library(car)
+library(corrplot)
+library(mgcv)
+library(knitr)
+library(scales)
+library(forcats)
+```
+
+# Summary
+
+Airbnb ratings are important because they influence how guests choose where to stay and how hosts build trust on the platform. For this project, I used Airbnb listing data from Inside Airbnb to examine whether listing characteristics can help explain review scores. The main goal was to build a regression model that predicts `review_scores_rating`, which acts as a general summary of a guest's experience.
+
+The final results suggest that some listing characteristics are related to review ratings, such as superhost status, price, number of reviews, availability, and minimum nights. However, the models did not explain a large portion of the variation in ratings. This does not necessarily mean the project failed. Instead, it became one of the main findings: guest experience is difficult to predict using listing-level information alone. Many important parts of a guest's stay, such as cleanliness, communication, expectations, neighborhood experience, or personal preference, are hard to fully capture in this data set. In other words, the available variables explain part of the rating story, but not the whole experience that guests are actually reviewing.
+
+# Business Question
+
+Our main question is:
+
+**Which Airbnb listing characteristics are associated with higher review ratings, and how well can those characteristics predict guest satisfaction?**
+
+This question matters because a host may want to know what features are associated with better ratings, while a platform may want to understand what listing characteristics help explain guest experience. Even if the model is not highly predictive, it can still help us understand which variables appear to matter and which ones do not explain much on their own.
+
+# Data Source and Initial Overview
+
+The data was obtained from Inside Airbnb. Originally, the data set contained 75 columns and 20,909 rows. A lot of these variables were not useful on this particular instance, such as URLs, host profile text, and other columns that were either identification fields or not directly related to the modeling question.
+
+```{r import-data}
+Airbnb <- read_csv("listings.csv")
+
+# Some text columns in the Inside Airbnb file can contain characters that RStudio/skimr
+# does not like when printing. This keeps the data readable and prevents knitting errors.
+Airbnb <- Airbnb %>%
+  mutate(across(where(is.character), ~ iconv(.x, from = "", to = "UTF-8", sub = "")))
+
+cat("Original number of observations:", nrow(Airbnb), "\n")
+cat("Original number of variables:", ncol(Airbnb), "\n")
+```
+
+For this project, I focused on variables that seemed most connected to listing quality, host behavior, availability, pricing, and property characteristics.
+
+```{r select-variables}
+airbnb_selected <- Airbnb %>%
+  transmute(
+    host_response_time,
+    host_is_superhost,
+    host_total_listings_count,
+    neighbourhood_cleansed,
+    room_type,
+    property_type,
+    bathrooms,
+    accommodates,
+    bedrooms,
+    beds,
+    price = parse_number(price),
+    minimum_nights,
+    maximum_nights,
+    availability_30,
+    availability_365,
+    number_of_reviews,
+    review_scores_rating
+  ) %>%
+  mutate(across(where(is.character), ~ iconv(.x, from = "", to = "UTF-8", sub = "")))
+
+cat("Number of variables selected for modeling:", ncol(airbnb_selected), "\n")
+
+# I am using glimpse here instead of printing a full skim table because some raw
+# text fields in the Airbnb data can create encoding issues when skimr prints.
+glimpse(airbnb_selected)
+```
+
+# Data Cleaning and Preparation
+
+The original data set contained a large amount of missingness, especially in variables connected to price and review scores. Since our goal is to predict review ratings, listings without a rating cannot be used in the model. Listings without price information were also removed because price is one of the main variables of interest and would be difficult to impute reliably.
+
+```{r missingness-summary}
+missing_summary <- airbnb_selected %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "missing_count") %>%
+  mutate(missing_percent = missing_count / nrow(airbnb_selected) * 100) %>%
+  arrange(desc(missing_percent))
+
+kable(missing_summary, digits = 2)
+```
+
+```{r clean-data}
+cleanAirbnb <- airbnb_selected %>%
+  drop_na(
+    host_response_time,
+    host_is_superhost,
+    host_total_listings_count,
+    neighbourhood_cleansed,
+    room_type,
+    property_type,
+    bathrooms,
+    accommodates,
+    bedrooms,
+    beds,
+    price,
+    minimum_nights,
+    maximum_nights,
+    availability_30,
+    availability_365,
+    number_of_reviews,
+    review_scores_rating
+  ) %>%
+  mutate(
+    host_is_superhost = factor(host_is_superhost),
+    neighbourhood_cleansed = factor(neighbourhood_cleansed),
+    room_type = factor(room_type),
+    property_type = fct_lump_n(factor(property_type), n = 10),
+    bathrooms = factor(bathrooms),
+    accommodates = factor(accommodates),
+    bedrooms = factor(bedrooms),
+    beds = factor(beds)
+  )
+
+cat("Number of observations after removing missing values:", nrow(cleanAirbnb), "\n")
+```
+
+This reduced the data set, but the remaining observations still give us enough data for regression analysis. The tradeoff is that we lose some listings, but we avoid making assumptions about missing prices or missing ratings that could create misleading results.
+
+# Exploratory Data Analysis
+
+Before building the regression models, I looked at how review scores vary across important listing characteristics. The goal here was not just to make graphs, but to understand where rating differences appear before modeling.
+
+## Distribution of Review Ratings
+
+```{r rating-distribution}
+ggplot(cleanAirbnb, aes(x = review_scores_rating)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "white") +
+  labs(
+    title = "Airbnb Review Scores Are Highly Concentrated Near the Top",
+    subtitle = "Most listings receive strong ratings, which makes prediction more difficult",
+    x = "Review score rating",
+    y = "Number of listings"
+  ) +
+  theme_minimal()
+```
+
+Review scores are heavily concentrated near the high end of the scale. This is important because when most ratings are already high, it becomes harder for a regression model to separate listings from each other. In other words, the model is not trying to predict a response variable with wide variation. It is trying to explain small differences among generally positive ratings.
+
+## Average Rating by Superhost Status
+
+```{r rating-superhost}
+cleanAirbnb %>%
+  group_by(host_is_superhost) %>%
+  summarise(
+    average_rating = mean(review_scores_rating, na.rm = TRUE),
+    listings = n(),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = host_is_superhost, y = average_rating, fill = host_is_superhost)) +
+  geom_col(show.legend = FALSE) +
+  coord_cartesian(ylim = c(4, 5)) +
+  labs(
+    title = "Superhosts Tend to Have Higher Average Ratings",
+    subtitle = "The y-axis begins at 4 to make the rating difference visible",
+    x = "Host is superhost",
+    y = "Average review score"
+  ) +
+  theme_minimal()
+```
+
+Superhost status is one of the more understandable predictors in the data. It makes sense that superhosts would tend to receive higher ratings because the status is connected to responsiveness, consistency, and previous guest satisfaction. One possible explanation is that Airbnb's Superhost designation already rewards behaviors that guests usually value, such as communication, reliability, and a strong record of past stays. This does not prove that being a superhost directly causes higher ratings, but it does show that superhost status is a useful signal of listing quality and trust.
+
+## Average Rating by Room Type
+
+```{r rating-room-type}
+cleanAirbnb %>%
+  group_by(room_type) %>%
+  summarise(
+    average_rating = mean(review_scores_rating, na.rm = TRUE),
+    listings = n(),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = reorder(room_type, average_rating), y = average_rating)) +
+  geom_col(fill = "gray50") +
+  coord_flip() +
+  coord_cartesian(ylim = c(4, 5)) +
+  labs(
+    title = "Average Ratings Differ Slightly by Room Type",
+    subtitle = "Room type may influence expectations and guest experience",
+    x = "Room type",
+    y = "Average review score"
+  ) +
+  theme_minimal()
+```
+
+Room type appears to have some relationship with ratings, although the differences are not extremely large. Entire homes and apartments tend to have slightly higher average ratings than more shared forms of accommodation. One possible reason is that private accommodations give guests more control over their environment, which can reduce issues related to noise, privacy, or shared spaces. At the same time, expectations matter a lot with ratings. A guest booking a shared room may judge the stay differently than someone booking an entire apartment, which is one reason review scores are not always easy to model with simple listing features.
+
+## Rating and Price
+
+```{r rating-price}
+ggplot(cleanAirbnb, aes(x = price, y = review_scores_rating)) +
+  geom_point(alpha = 0.25) +
+  scale_x_log10(labels = dollar_format()) +
+  geom_smooth(method = "lm", se = TRUE, color = "red") +
+  labs(
+    title = "Higher Prices Do Not Automatically Mean Higher Ratings",
+    subtitle = "Price is shown on a log scale because listing prices vary widely",
+    x = "Price (log scale)",
+    y = "Review score rating"
+  ) +
+  theme_minimal()
+```
+
+One interesting observation is that higher-priced listings do not consistently receive higher ratings. The fitted line shows a slight positive trend, but there is still a lot of variation at nearly every price point. This suggests that guests may evaluate a listing relative to their expectations rather than based on cost alone. A moderately priced listing that exceeds expectations may receive a stronger rating than an expensive listing that does not feel worth its price. Because of that, price matters, but it does not operate like a simple guarantee of guest satisfaction.
+
+## Listings by Neighborhood
+
+```{r neighborhood-count}
+cleanAirbnb %>%
+  count(neighbourhood_cleansed, sort = TRUE) %>%
+  ggplot(aes(x = reorder(neighbourhood_cleansed, n), y = n)) +
+  geom_col(fill = "gray50") +
+  coord_flip() +
+  labs(
+    title = "Listings by Neighborhood",
+    subtitle = "Neighborhood is included because location can affect guest experience",
+    x = "Neighborhood",
+    y = "Number of listings"
+  ) +
+  theme_minimal()
+```
+
+Neighborhood is useful because location can influence the overall experience. However, it may also capture many things at once, such as access to transportation, safety, nearby attractions, noise, or price differences.
+
+## Average Rating by Neighborhood
+
+```{r neighborhood-rating}
+cleanAirbnb %>%
+  group_by(neighbourhood_cleansed) %>%
+  summarise(
+    average_rating = mean(review_scores_rating, na.rm = TRUE),
+    listings = n(),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = reorder(neighbourhood_cleansed, average_rating), y = average_rating)) +
+  geom_col(fill = "gray50") +
+  coord_flip() +
+  coord_cartesian(ylim = c(4, 5)) +
+  labs(
+    title = "Average Ratings Also Vary by Neighborhood",
+    subtitle = "The differences are not huge, but location may still shape the guest experience",
+    x = "Neighborhood",
+    y = "Average review score"
+  ) +
+  theme_minimal()
+```
+
+The neighborhood rating graph gives more context than the listing count graph alone. Some neighborhoods have slightly higher average ratings, but the differences are not large enough to suggest that location alone determines satisfaction. Instead, neighborhood likely works through other parts of the guest experience: convenience, transportation, attractions, noise, safety, and whether the area matches what the guest expected when booking. This makes neighborhood useful, but also difficult to interpret as one simple effect.
+
+# Multicollinearity and Variable Distributions
+
+## Correlation Among Quantitative Variables
+
+```{r correlation-heatmap}
+quantitative_vars <- cleanAirbnb %>%
+  select(
+    host_total_listings_count,
+    price,
+    minimum_nights,
+    maximum_nights,
+    availability_30,
+    availability_365,
+    number_of_reviews,
+    review_scores_rating
+  )
+
+cor_matrix <- cor(quantitative_vars, use = "complete.obs")
+
+corrplot(
+  cor_matrix,
+  method = "color",
+  type = "upper",
+  tl.col = "black",
+  tl.srt = 45,
+  addCoef.col = "black",
+  number.cex = 0.7
+)
+```
+
+The correlation matrix does not suggest severe multicollinearity among the quantitative predictors. Some variables are naturally related, such as availability measures, but none of the relationships appear strong enough to make the model unusable.
+
+```{r vif-check}
+quant_model_for_vif <- lm(
+  review_scores_rating ~ host_total_listings_count + price + minimum_nights +
+    maximum_nights + availability_30 + availability_365 + number_of_reviews,
+  data = cleanAirbnb
+)
+
+vif_values <- vif(quant_model_for_vif)
+kable(as.data.frame(vif_values), col.names = "VIF", digits = 3)
+```
+
+The VIF values help confirm that the quantitative variables are not showing problematic multicollinearity. This is useful because it means the regression coefficients are less likely to be distorted by predictors that are too redundant with each other.
+
+## Transforming Skewed Predictors
+
+Many Airbnb variables are naturally skewed. Price, number of reviews, and minimum nights are good examples because most listings are moderate, but a few listings have very large values. To reduce the influence of extreme values and make the model more stable, I used `log1p()` transformations for several quantitative predictors.
+
+```{r transform-variables}
+model_data <- cleanAirbnb %>%
+  mutate(
+    log_price = log1p(price),
+    log_minimum_nights = log1p(minimum_nights),
+    log_maximum_nights = log1p(maximum_nights),
+    log_number_of_reviews = log1p(number_of_reviews),
+    log_availability_30 = log1p(availability_30),
+    log_availability_365 = log1p(availability_365)
+  ) %>%
+  filter(host_total_listings_count < 600)
+
+cat("Observations after removing extreme host listing count values:", nrow(model_data), "\n")
+```
+
+The host total listings count variable also had a few extreme values. These likely represent professional or business-style hosts with hundreds of listings. Since those listings can behave differently from a typical host and can strongly affect the model, I removed the most extreme cases for the main analysis.
+
+# Regression Modeling
+
+## Full Model
+
+The full regression model uses both quantitative and categorical variables. The goal is not to create a perfect prediction tool, but to understand which listing characteristics are associated with review ratings.
+
+```{r full-model}
+full_model <- lm(
+  review_scores_rating ~
+    host_response_time +
+    host_is_superhost +
+    host_total_listings_count +
+    neighbourhood_cleansed +
+    room_type +
+    property_type +
+    bathrooms +
+    accommodates +
+    bedrooms +
+    beds +
+    log_price +
+    log_minimum_nights +
+    log_maximum_nights +
+    log_availability_30 +
+    log_availability_365 +
+    log_number_of_reviews,
+  data = model_data
+)
+
+tidy(full_model) %>%
+  arrange(p.value) %>%
+  head(20) %>%
+  kable(digits = 4)
+
+glance(full_model) %>%
+  select(r.squared, adj.r.squared, sigma, statistic, p.value) %>%
+  kable(digits = 4)
+```
+
+The full model is statistically significant overall, which means at least some predictors are related to review scores. However, the R-squared value remains fairly low. In practical terms, the model explains only about 10% of the variation in review ratings. That means roughly 90% of what influences guest ratings is not being captured by these listing characteristics.
+
+This makes sense in context. Guest ratings are based on experience, and experience is partly subjective. Two guests can stay in similar listings and still rate them differently based on expectations, cleanliness, communication, personal preference, and the specific details of the trip. The large sample size also means that many variables can appear statistically significant, but statistical significance does not automatically mean the model is strongly predictive in a practical sense.
+
+## Stepwise Model
+
+I also used stepwise selection to identify a more focused model. This helps reduce the number of predictors while keeping variables that improve model fit.
+
+```{r stepwise-model}
+intercept_only <- lm(review_scores_rating ~ 1, data = model_data)
+step_model <- step(
+  intercept_only,
+  direction = "forward",
+  scope = formula(full_model),
+  trace = 0
+)
+
+tidy(step_model) %>%
+  arrange(p.value) %>%
+  head(20) %>%
+  kable(digits = 4)
+
+glance(step_model) %>%
+  select(r.squared, adj.r.squared, sigma, statistic, p.value) %>%
+  kable(digits = 4)
+```
+
+The stepwise model gives a cleaner version of the regression by focusing on the variables that contribute most to the prediction. Still, the overall explanatory power remains limited. This reinforces the idea that the available listing variables explain only a small part of guest ratings.
+
+## Reduced Model
+
+For interpretability, I created a reduced model using variables that are easier to explain and that appeared important in the earlier modeling process.
+
+```{r reduced-model}
+reduced_model <- lm(
+  review_scores_rating ~
+    host_is_superhost +
+    host_total_listings_count +
+    log_availability_365 +
+    log_number_of_reviews +
+    log_availability_30 +
+    log_price +
+    log_minimum_nights +
+    room_type,
+  data = model_data
+)
+
+tidy(reduced_model) %>%
+  kable(digits = 4)
+
+glance(reduced_model) %>%
+  select(r.squared, adj.r.squared, sigma, statistic, p.value) %>%
+  kable(digits = 4)
+```
+
+The reduced model is easier to communicate, but it does not perform as well as the larger model. This creates the modeling tradeoff where the full model explains slightly more variation, while the reduced model is easier to interpret. Since the difference in predictive strength is not large, the reduced model is still useful for explaining the main patterns in a more readable way.
+
+A few of the signs are also worth thinking about. Superhost status has a positive association with rating, which is expected. Price also has a positive association, but that does not mean expensive listings are automatically better. It may reflect that higher-priced listings sometimes come with stronger amenities, locations, or professional presentation. Number of reviews has a negative coefficient, which is interesting. One possible explanation is that listings with many reviews have simply had more chances to receive occasional lower ratings, while newer listings with fewer reviews may maintain near-perfect averages more easily.
+
+## Most Important Predictors in the Reduced Model
+
+```{r reduced-coefficient-plot}
+coef_plot_data <- tidy(reduced_model, conf.int = TRUE) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    term_label = case_when(
+      term == "host_is_superhostTRUE" ~ "Superhost",
+      term == "host_total_listings_count" ~ "Host total listings",
+      term == "log_availability_365" ~ "Availability, 365 days",
+      term == "log_number_of_reviews" ~ "Number of reviews",
+      term == "log_availability_30" ~ "Availability, 30 days",
+      term == "log_price" ~ "Price",
+      term == "log_minimum_nights" ~ "Minimum nights",
+      term == "room_typeHotel room" ~ "Hotel room",
+      term == "room_typePrivate room" ~ "Private room",
+      term == "room_typeShared room" ~ "Shared room",
+      TRUE ~ term
+    )
+  )
+
+ggplot(coef_plot_data, aes(x = reorder(term_label, estimate), y = estimate)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  geom_pointrange(aes(ymin = conf.low, ymax = conf.high)) +
+  coord_flip() +
+  labs(
+    title = "Estimated Effects from the Reduced Model",
+    subtitle = "Points show estimated coefficients, with 95% confidence intervals",
+    x = "Predictor",
+    y = "Estimated effect on review score"
+  ) +
+  theme_minimal()
+```
+
+This plot makes the reduced model easier to read than the coefficient table alone. Superhost status stands out as one of the clearer positive signals. Price and minimum nights also show positive relationships, while availability and host listing count have negative relationships. I would interpret these as associations rather than direct causes, but they still help show which variables are carrying most of the model's explanation.
+
+```{r compare-models}
+anova(reduced_model, step_model)
+```
+
+The comparison shows whether the additional variables in the stepwise model provide a statistically meaningful improvement. Even when the larger model is statistically better, the practical improvement should still be judged carefully because the overall R-squared remains low.
+
+# Model Diagnostics
+
+```{r residuals-fitted}
+model_data <- model_data %>%
+  mutate(
+    fitted_step = fitted(step_model),
+    residuals_step = residuals(step_model)
+  )
+
+ggplot(model_data, aes(x = fitted_step, y = residuals_step)) +
+  geom_point(alpha = 0.25) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Residuals vs. Fitted Values",
+    subtitle = "The pattern suggests that the linear model does not capture all rating behavior",
+    x = "Fitted values",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+```
+
+The residual plot suggests that the model does not fully capture the structure of the data. This is not surprising because review ratings are concentrated near the high end of the scale, and the relationship between listing characteristics and guest satisfaction is probably not purely linear.
+
+```{r qq-residuals}
+qqnorm(residuals(step_model))
+qqline(residuals(step_model), col = "red")
+```
+
+The residual diagnostics suggest that a standard linear model has limitations for this problem. This does not make the model useless, but it means the results should be interpreted as associations rather than as a highly accurate prediction system.
+
+# Can a Nonlinear Model Help?
+
+Since the residual analysis suggested that a linear model may not fully capture the relationships in the data, I also tested a Generalized Additive Model, or GAM. GAMs are useful because they allow some predictors to have flexible nonlinear relationships with the response variable. This is helpful here because variables such as price, number of reviews, and availability may not affect ratings in a straight line.
+
+```{r gam-model}
+gam_model <- gam(
+  review_scores_rating ~
+    s(host_total_listings_count) +
+    host_is_superhost +
+    s(log_availability_365) +
+    s(log_number_of_reviews) +
+    s(log_availability_30) +
+    s(log_price) +
+    s(log_minimum_nights) +
+    room_type,
+  data = model_data
+)
+
+summary(gam_model)
+```
+
+The GAM gives the model more flexibility, especially for variables that may not have a simple linear effect. However, even with this added flexibility, the model only explains slightly more variation than the linear regression models. This is a useful result because it suggests that the issue is not only the linear form of the model. If allowing nonlinear patterns only improves the model a little, then the larger limitation is probably missing information about the actual guest experience.
+
+```{r gam-plots, fig.height=8, fig.width=10}
+plot(gam_model, pages = 1, shade = TRUE)
+```
+
+The smooth terms help show where the relationship between a predictor and rating changes shape. For example, price or number of reviews may have a different effect at low values than at high values. This is useful because it gives more detail than a regular regression coefficient, but the overall conclusion remains similar: listing characteristics provide some information about ratings, but they do not tell the whole story. In this case, model choice helps, but it does not fully solve the prediction problem.
+
+## Model Comparison Summary
+
+```{r model-comparison-summary}
+model_comparison <- bind_rows(
+  glance(full_model) %>% mutate(model = "Full linear model"),
+  glance(step_model) %>% mutate(model = "Stepwise linear model"),
+  glance(reduced_model) %>% mutate(model = "Reduced linear model")
+) %>%
+  select(model, r.squared, adj.r.squared, sigma, statistic, p.value)
+
+gam_comparison <- tibble(
+  model = "Generalized additive model",
+  r.squared = summary(gam_model)$r.sq,
+  adj.r.squared = summary(gam_model)$r.sq,
+  sigma = sqrt(summary(gam_model)$scale),
+  statistic = NA_real_,
+  p.value = NA_real_
+)
+
+bind_rows(model_comparison, gam_comparison) %>%
+  kable(digits = 4)
+```
+
+The model comparison makes the main point clear. The GAM improves the model slightly, but not enough to change the overall interpretation. The listing variables do have relationships with ratings, but they are not enough to strongly predict ratings on their own. This strengthens the idea that guest satisfaction depends on factors that are either missing from the data or difficult to measure numerically.
+
+# Key Findings
+
+1. **Review scores are highly concentrated near the top of the rating scale.** This makes prediction difficult because most listings are already rated highly, so the model is trying to explain small differences among generally positive ratings.
+
+2. **Superhost status is one of the clearest signals associated with higher ratings.** This makes sense because it is connected to reliability, communication, and previous guest satisfaction. It is less about one physical feature of the listing and more about trust.
+
+3. **Price has a relationship with ratings, but higher prices do not automatically mean better ratings.** Guests likely judge a listing based on whether the experience matches the price they paid. This makes expectations an important part of the rating process.
+
+4. **Number of reviews has a negative relationship in the model, which is interesting.** Listings with many reviews may have had more chances to receive occasional lower ratings, while newer listings can sometimes maintain very high averages with fewer stays.
+
+5. **The regression models are statistically significant but have low explanatory power.** The models explain only a small part of rating variation, which suggests that most of guest satisfaction depends on information not fully captured in the listing data.
+
+6. **The GAM model adds flexibility but does not completely solve the problem.** This suggests that missing guest-experience variables matter more than just choosing a more flexible model.
+
+# Recommendations
+
+Based on the analysis, I would not recommend using these listing characteristics alone to make strong predictions about guest ratings. The model can help identify general patterns, but it is not strong enough to serve as a complete rating prediction tool. A better use of this model would be as an exploratory tool for understanding which listing features are associated with ratings, not as a final system for predicting how guests will review a stay.
+
+For hosts, the results suggest that factors connected to trust and consistency, such as superhost status and responsiveness, may matter more than basic listing characteristics alone. For analysts, the project shows the importance of including more guest-experience variables if the goal is to predict review scores more accurately.
+
+If this analysis were expanded, I would want to include variables related to cleanliness, communication, sentiment from review text, cancellation policies, location quality, and amenities. I would especially want to use review text because written comments may capture the reasons behind the rating better than listing-level numbers. These variables may better represent the parts of an Airbnb stay that guests actually remember when deciding whether to leave a high or low score.
+
+# Limitations
+
+There are several limitations to this project. First, many observations were removed because of missing values, especially missing price or review score information. Second, review ratings are subjective and may reflect guest expectations as much as listing quality. Third, the data set contains many listing-level variables but does not fully capture the actual experience of staying at the property.
+
+Another important limitation is that this analysis is observational. The model can show associations, but it cannot prove that one listing feature directly causes a higher or lower rating.
+
+# Final Summary
+
+This project helped show that predicting Airbnb review ratings is more complicated than it may look at first. While some listing and host characteristics are statistically related to ratings, the models explain only a small portion of the variation. This suggests that guest satisfaction depends on many factors beyond what is included in the listing data.
+
+Overall, the analysis still gives useful insight. Superhost status, availability, price, review activity, room type, and neighborhood all appear to matter in some way, however, the low R-squared and model diagnostics suggest that guest ratings are shaped by a broader and more personal experience than the available variables can fully measure. To me, that is the main takeaway: ratings are not just a product of the listing itself, but also of expectations, service quality, and the individual guest experience.
