@@ -1,0 +1,561 @@
+---
+title: "Global Migration and Population Trends - Revised"
+subtitle: "A Data-Driven Analysis of World Bank Data, 2000-2019"
+author: "Kennedy Rodriguez"
+date: "4/20/2024"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    code_folding: "hide"
+    df_print: kable
+    theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 6
+)
+
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(DT)
+library(plotly)
+library(scales)
+library(broom)
+library(knitr)
+```
+
+# Summary
+
+This project looks at World Bank population and net migration data from 2000 to 2019. The main goal was to explore whether migration patterns and population patterns seem related, and to see if that relationship changes depending on the region or country being observed.
+
+The original question was: **Is there a relationship between migration trends and population trends?** After cleaning and reshaping the data, the analysis showed that looking only at raw migration totals can be misleading because countries and regions have very different population sizes. To make the comparison more fair, this report also uses a **net migration rate per 100,000 people**. This made the project more useful because it allowed smaller and larger countries to be compared on a more even scale.
+
+Overall, the project found that migration and population are connected, but the relationship is not simple. Population size alone does not fully explain migration. Regional, economic, political, and geographic factors likely play a large role as well.
+
+# Introduction
+
+The data used in this project comes from the World Bank Country Level Statistics. The years included in the report are 2000 through 2019. This range was chosen because it gives enough time to observe changes over a period of years while still keeping the project manageable.
+
+Migration is important because it affects labor markets, population growth, public services, housing, education, and the general makeup of communities. Because of that, it is not only a political or economic topic, but also something that can be seen in people's day-to-day lives.
+
+For this project, the question of interest is:
+
+> **How are net migration and population trends related across countries and regions from 2000 to 2019?**
+
+A second question was added after looking more closely at the data:
+
+> **Does using migration rate, instead of raw migration totals, change the way we interpret migration patterns?**
+
+# Data Source and Variables
+
+Two World Bank data files were used:
+
+- **Population, total**: total population by country or region and year
+- **Net migration**: the net number of migrants by country or region and year
+
+Net migration can be positive or negative. A positive value means more people entered than left, while a negative value means more people left than entered.
+
+The main variables used in the cleaned data are:
+
+- **country_name**: country or region name
+- **country_code**: three-letter World Bank country code
+- **year**: observation year
+- **population**: total population
+- **net_migration**: net migration count
+- **migration_rate_per_100k**: net migration divided by population, multiplied by 100,000
+
+# Data Processing
+
+## Importing the Data
+
+```{r import-data}
+pop_xlsx <- read_excel("population.xlsx")
+net_migration_xlsx <- read_excel("netmigration.xlsx")
+
+pop_raw <- clean_names(pop_xlsx)
+migration_raw <- clean_names(net_migration_xlsx)
+```
+
+The two files have the same general layout. Each one includes a country name, country code, series information, and one column for each year.
+
+```{r preview-raw-data}
+datatable(
+  head(pop_raw, 10),
+  rownames = FALSE,
+  filter = "top",
+  options = list(pageLength = 5, scrollX = TRUE)
+)
+```
+
+## Cleaning and Reshaping the Data
+
+The original data was in a wide format, with a separate column for each year. For analysis and visualization, it is easier to use a long format where each row represents one country or region in one year.
+
+```{r clean-and-reshape}
+clean_world_bank <- function(data, value_name) {
+  data %>%
+    select(-series_name, -series_code) %>%
+    pivot_longer(
+      cols = -c(country_name, country_code),
+      names_to = "year",
+      values_to = value_name
+    ) %>%
+    mutate(
+      year = str_extract(year, "\\d{4}"),
+      year = as.numeric(year),
+      across(all_of(value_name), ~ na_if(as.character(.x), "..")),
+      across(all_of(value_name), as.numeric)
+    )
+}
+
+population_long <- clean_world_bank(pop_raw, "population")
+migration_long <- clean_world_bank(migration_raw, "net_migration")
+
+migration_population <- population_long %>%
+  full_join(migration_long, by = c("country_name", "country_code", "year")) %>%
+  drop_na(population, net_migration) %>%
+  mutate(
+    migration_rate_per_100k = (net_migration / population) * 100000
+  )
+```
+
+This step helped simplify the report. Instead of manually renaming every year column, the data is reshaped in a cleaner way that can also work if more years are added later.
+
+## Separating Countries and Regions
+
+The World Bank data includes both individual countries and larger regional groupings. Both are useful, but they answer slightly different questions. Countries are better for direct comparisons, while regions help show broader patterns.
+
+```{r define-regions}
+region_names <- c(
+  "Africa Eastern and Southern",
+  "Africa Western and Central",
+  "Arab World",
+  "Central Europe and the Baltics",
+  "East Asia & Pacific",
+  "Euro area",
+  "Europe & Central Asia",
+  "European Union",
+  "Latin America & Caribbean",
+  "Middle East & North Africa",
+  "North America",
+  "South Asia",
+  "Sub-Saharan Africa"
+)
+
+aggregate_names <- c(
+  region_names,
+  "World",
+  "High income",
+  "Low income",
+  "Lower middle income",
+  "Middle income",
+  "Upper middle income",
+  "Least developed countries: UN classification",
+  "OECD members",
+  "IDA & IBRD total",
+  "IBRD only",
+  "IDA total",
+  "IDA blend",
+  "IDA only",
+  "Early-demographic dividend",
+  "Late-demographic dividend",
+  "Post-demographic dividend",
+  "Pre-demographic dividend",
+  "Fragile and conflict affected situations",
+  "Heavily indebted poor countries (HIPC)",
+  "Small states",
+  "Other small states",
+  "Caribbean small states",
+  "Pacific island small states"
+)
+
+region_data <- migration_population %>%
+  filter(country_name %in% region_names)
+
+country_data <- migration_population %>%
+  filter(!country_name %in% aggregate_names)
+```
+
+```{r data-summary}
+summary_table <- tibble(
+  Measure = c("Rows in cleaned data", "Countries/areas in country data", "Regions used", "First year", "Last year"),
+  Value = c(
+    nrow(migration_population),
+    n_distinct(country_data$country_name),
+    n_distinct(region_data$country_name),
+    min(migration_population$year),
+    max(migration_population$year)
+  )
+)
+
+kable(summary_table)
+```
+
+# Exploratory Data Analysis
+
+## Global Population Trend
+
+```{r global-population-trend}
+global_population <- migration_population %>%
+  filter(country_name == "World") %>%
+  arrange(year)
+
+p_global_pop <- ggplot(global_population, aes(x = year, y = population)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) +
+  labs(
+    title = "World Population Increased Steadily from 2000 to 2019",
+    subtitle = "Total world population by year, based on World Bank data",
+    x = "Year",
+    y = "Population"
+  ) +
+  theme_minimal()
+
+p_global_pop
+```
+
+The world population increased steadily during the full period. This is expected, but it also gives context for the rest of the project. When population grows, raw migration counts can also become larger even if migration is not necessarily becoming more common relative to population size.
+
+## Regional Population Trends
+
+```{r regional-population-trends}
+p_region_pop <- region_data %>%
+  ggplot(aes(x = year, y = population, color = country_name)) +
+  geom_line(linewidth = 1) +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) +
+  labs(
+    title = "Population Trends Differ Strongly by Region",
+    subtitle = "Regional population totals from 2000 to 2019",
+    x = "Year",
+    y = "Population",
+    color = "Region"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+p_region_pop
+```
+
+Regions do not grow at the same pace. Some regions show steady and strong population growth, while others are more stable. This matters because population size can make raw migration numbers look larger or smaller than they really are in context.
+
+## Regional Net Migration Trends
+
+```{r regional-migration-trends}
+p_region_migration <- region_data %>%
+  ggplot(aes(x = year, y = net_migration, color = country_name)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_line(linewidth = 1) +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) +
+  labs(
+    title = "Net Migration Varies More Sharply Than Population",
+    subtitle = "Positive values represent net migration gains, while negative values represent net migration losses",
+    x = "Year",
+    y = "Net migration",
+    color = "Region"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+p_region_migration
+```
+
+Unlike population, net migration can move up and down more sharply. This makes sense because migration is often affected by economic opportunity, political conditions, conflict, policy changes, and other events that can change faster than population totals.
+
+North America maintains consistently positive net migration values, reflecting its continued role as a destination for migrants seeking educational, economic, and employment opportunities. Similarly, Europe and the European Union remain largely positive throughout the period, although some fluctuations are visible following the 2008 global financial crisis and later during the European migrant and refugee crisis around 2015.
+
+The Middle East and North Africa exhibit some of the largest swings in migration. One possible explanation is the political instability that affected the region during the Arab Spring beginning in 2010, as well as ongoing conflicts in countries such as Syria, Libya, and Yemen. These events led to large-scale population displacement and may help explain the sudden changes observed in the years following 2010.
+
+# Why Migration Rate Matters
+
+Looking at raw migration numbers is useful, but it does not always give a fair comparison. A country with a very large population can have a large number of migrants while still having a small migration rate. A smaller country can have a lower raw migration number but a much bigger impact relative to its population.
+
+For that reason, this report uses:
+
+\[
+\text{Migration Rate per 100,000 People} = \frac{\text{Net Migration}}{\text{Population}} \times 100,000
+\]
+
+## Countries with the Highest Positive Migration Rates in 2019
+
+```{r top-positive-rate-2019}
+top_positive_2019 <- country_data %>%
+  filter(year == 2019) %>%
+  arrange(desc(migration_rate_per_100k)) %>%
+  slice_head(n = 15)
+
+ggplot(top_positive_2019, aes(x = reorder(country_name, migration_rate_per_100k), y = migration_rate_per_100k)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Countries with the Highest Positive Net Migration Rates in 2019",
+    subtitle = "Using rate per 100,000 people makes smaller and larger countries easier to compare",
+    x = "Country",
+    y = "Net migration rate per 100,000 people"
+  ) +
+  theme_minimal()
+```
+
+This chart shows why rates are helpful. The countries with the highest migration rates are not always the countries with the largest raw population. This gives a more balanced view of where migration may be having the strongest relative effect.
+
+Several of the countries shown in the figure share characteristics that may help explain their high migration rates. Luxembourg, Malta, and Monaco are known for strong economies, relatively high standards of living, and employment opportunities that attract international workers. Similarly, Canada and New Zealand have long maintained immigration policies that encourage skilled migration and population growth through immigration.]
+
+A curious one is the Syrian Arab Republic, which reflect the importance or reginal or geopolitical circumstances, sinces it has one of the highest migration rates despite the instability is suffered in the 2010s, so the net migration could be return migration due to displacement or changes on estimates by the World Bank.
+
+
+## Countries with the Lowest Negative Migration Rates in 2019
+
+```{r top-negative-rate-2019}
+top_negative_2019 <- country_data %>%
+  filter(year == 2019) %>%
+  arrange(migration_rate_per_100k) %>%
+  slice_head(n = 15)
+
+ggplot(top_negative_2019, aes(x = reorder(country_name, migration_rate_per_100k), y = migration_rate_per_100k)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Countries with the Lowest Net Migration Rates in 2019",
+    subtitle = "Negative values show places where more people left than entered",
+    x = "Country",
+    y = "Net migration rate per 100,000 people"
+  ) +
+  theme_minimal()
+```
+
+Negative migration rates are also important. They can suggest population loss through migration, although the reasons behind that would need more context than this data set alone can provide.
+
+One notable pattern is that many countries experiencing large migration losses are either small island economies or countries facing economic or political uncertainty. This suggests that migration is often influenced by a combination of push factors, such as limited opportunities or instability at home, and pull factors, such as employment, education, and quality of life in destination countries.
+
+# Relationship Between Population and Migration
+
+## Population vs. Net Migration
+
+```{r population-vs-migration}
+data_2019 <- country_data %>%
+  filter(year == 2019)
+
+p_scatter_raw <- ggplot(data_2019, aes(x = population, y = net_migration, text = country_name)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_point(alpha = 0.7) +
+  scale_x_log10(labels = label_number(scale_cut = cut_short_scale())) +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) +
+  labs(
+    title = "Population Size Alone Does Not Explain Net Migration",
+    subtitle = "2019 country-level comparison, with population shown on a log scale",
+    x = "Population (log scale)",
+    y = "Net migration"
+  ) +
+  theme_minimal()
+
+ggplotly(p_scatter_raw, tooltip = c("text", "x", "y"))
+```
+
+The scatterplot suggests that countries with larger populations do not automatically have higher net migration. Some large countries have negative net migration, while some smaller countries have strong positive migration rates. This supports the idea that population is part of the story, but not the full explanation.
+
+## Population vs. Migration Rate
+
+```{r population-vs-migration-rate}
+p_scatter_rate <- ggplot(data_2019, aes(x = population, y = migration_rate_per_100k, text = country_name)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_point(alpha = 0.7) +
+  scale_x_log10(labels = label_number(scale_cut = cut_short_scale())) +
+  labs(
+    title = "Migration Rate Gives a Different View Than Raw Migration Counts",
+    subtitle = "2019 country-level migration rate per 100,000 people",
+    x = "Population (log scale)",
+    y = "Net migration rate per 100,000 people"
+  ) +
+  theme_minimal()
+
+ggplotly(p_scatter_rate, tooltip = c("text", "x", "y"))
+```
+
+This graph makes it clearer that migration can affect smaller countries more strongly in relative terms. It also shows why using rates is helpful when the goal is to compare countries of very different sizes.
+
+# Regression Analysis
+
+A simple regression was used to check whether population size helps explain net migration. Since population values vary greatly across countries, the model uses the log of population.
+
+```{r regression-model}
+migration_model <- lm(net_migration ~ log10(population), data = data_2019)
+
+model_summary <- tidy(migration_model)
+model_glance <- glance(migration_model)
+
+kable(model_summary, digits = 4)
+kable(model_glance %>% select(r.squared, adj.r.squared, statistic, p.value), digits = 4)
+```
+
+Our regression model indicates a statistically significant relationship between population size and net migration (p < 0.001). However, the overall explanatory power of the model is relatively weak, with an R2 value of approximately 0.071. This means that population size accounts for only about 7% of the variation in net migration across countries in 2019.
+
+```{r}
+ggplot(data_2019,
+       aes(x = log10(population),
+           y = net_migration)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = TRUE) +
+  labs(
+    title = "Population Size Alone Is a Weak Predictor of Net Migration",
+    x = "Log10(Population)",
+    y = "Net Migration"
+  ) +
+  theme_minimal()
+```
+
+As we can observe, the wide spread of points around the regression line visually reinforces that the low R2 value, suggesting that factors other than population size are responsible for most of the variation in migration patterns across countries.
+
+## Regression Using Migration Rate
+
+```{r regression-rate-model}
+rate_model <- lm(migration_rate_per_100k ~ log10(population), data = data_2019)
+
+rate_model_summary <- tidy(rate_model)
+rate_model_glance <- glance(rate_model)
+
+kable(rate_model_summary, digits = 4)
+kable(rate_model_glance %>% select(r.squared, adj.r.squared, statistic, p.value), digits = 4)
+```
+
+Since countries vary substantially in population size, a second regression model was fitted using migration rate per 100,000 people rather than total net migration. This provides a fairer comparison across countries by measuring migration relative to population size instead of using raw migration totals.
+
+Unlike the previous model, the relationship between population size and migration rate was not statistically significant (p = 0.096). The estimated coefficient for log-transformed population was positive, suggesting that larger countries may experience slightly higher migration rates on average, but the evidence for this relationship is weak and does not meet conventional levels of statistical significance. The model's R2 value was approximately 0.012, meaning that the population size explains only about 1.2% of the variation in migration rates across countries.
+
+
+
+# Geographic View of Migration Rates
+
+```{r choropleth-map}
+map_data_2019 <- data_2019 %>%
+  filter(!is.na(country_code), nchar(country_code) == 3)
+
+plot_ly(
+  map_data_2019,
+  type = "choropleth",
+  locations = ~country_code,
+  z = ~migration_rate_per_100k,
+  text = ~paste(
+    country_name,
+    "<br>Migration rate per 100k:", round(migration_rate_per_100k, 2),
+    "<br>Net migration:", comma(net_migration),
+    "<br>Population:", comma(population)
+  ),
+  colorscale = "RdBu",
+  reversescale = FALSE,
+  marker = list(line = list(color = "white", width = 0.5)),
+  colorbar = list(title = "Rate per 100k")
+) %>%
+  layout(
+    title = "Net Migration Rate by Country in 2019",
+    geo = list(showframe = FALSE, showcoastlines = TRUE)
+  )
+```
+
+The map helps show the geographic side of migration. Instead of only seeing countries in a table or scatterplot, the map makes it easier to notice regional patterns and outliers.
+
+# Regional Comparison Using Migration Rate
+
+```{r regional-rate-trends}
+p_region_rate <- region_data %>%
+  ggplot(aes(x = year, y = migration_rate_per_100k, color = country_name)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_line(linewidth = 1) +
+  labs(
+    title = "Regional Migration Rates Show Different Patterns Over Time",
+    subtitle = "Net migration per 100,000 people, 2000-2019",
+    x = "Year",
+    y = "Net migration rate per 100,000 people",
+    color = "Region"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+p_region_rate
+```
+
+Using migration rate makes regional comparisons more meaningful. It shows the migration pattern relative to population size, instead of only showing which regions have the largest total numbers.
+
+The regional differences shown in this figure help explain why the migration-rate regression produced such a low R2 value. Countries and regions with similar population sizes often experienced very different migration outcomes, suggesting that migration is driven more by regional conditions and historical events than by population size itself.
+
+South Asia remains negative for much of the study period, indicating persistent net migration losses. This pattern is consistent with long-standing labor migration trends, as many workers from countries such as India, Pakistan, Bangladesh, and Nepal migrate to regions offering greater employment opportunities
+
+
+
+# Countries with the Largest Changes Over Time
+
+This section looks at countries where the migration rate changed the most between 2000 and 2019.
+
+```{r migration-rate-change}
+change_data <- country_data %>%
+  filter(year %in% c(2000, 2019)) %>%
+  select(country_name, country_code, year, migration_rate_per_100k) %>%
+  pivot_wider(names_from = year, values_from = migration_rate_per_100k, names_prefix = "rate_") %>%
+  drop_na(rate_2000, rate_2019) %>%
+  mutate(change_2000_to_2019 = rate_2019 - rate_2000)
+
+largest_increases <- change_data %>%
+  arrange(desc(change_2000_to_2019)) %>%
+  slice_head(n = 10)
+
+largest_decreases <- change_data %>%
+  arrange(change_2000_to_2019) %>%
+  slice_head(n = 10)
+
+change_plot_data <- bind_rows(
+  largest_increases %>% mutate(group = "Largest increases"),
+  largest_decreases %>% mutate(group = "Largest decreases")
+)
+
+ggplot(change_plot_data, aes(x = reorder(country_name, change_2000_to_2019), y = change_2000_to_2019)) +
+  geom_col() +
+  coord_flip() +
+  facet_wrap(~ group, scales = "free_y") +
+  labs(
+    title = "Largest Changes in Migration Rate from 2000 to 2019",
+    subtitle = "Change in net migration rate per 100,000 people",
+    x = "Country",
+    y = "Change in migration rate"
+  ) +
+  theme_minimal()
+```
+
+This figure helps identify countries where migration patterns changed the most over the full time period. These countries would be good candidates for deeper research because the data alone can show the pattern, but it cannot fully explain what caused it.
+
+# Key Findings
+
+1. **Population increased steadily worldwide from 2000 to 2019.** This gives important background, but population growth alone does not fully explain migration.
+
+2. **Raw migration totals can be misleading.** Larger countries and regions naturally have larger numbers, so migration rate per 100,000 people gives a more balanced comparison.
+
+3. **Migration patterns vary by region.** Some regions show more stable patterns, while others move between positive and negative net migration over time.
+
+4. **The relationship between population and migration is present, but not strong enough by itself.** The regression results suggest that other factors would be needed to better explain migration trends.
+
+5. **Geographic patterns matter.** The map and regional trends show that migration should not be studied only as a global total. Location plays an important role.
+
+# Future Work
+
+If I was to retake this project in the future I would be adding more variables that could help explain migration patterns. For example:
+
+- GDP per capita
+- unemployment rate
+- conflict or political stability indicators
+- urbanization rate
+- education levels
+- regional classifications
+
+A future version could also build a more complete model to predict migration rate using economic and social variables, not just population. That would make the analysis more explanatory and less descriptive.
+
+# Conclusion
+
+The analysis shows that migration and population are related, but not in a simple way. Population size gives useful context, but it does not fully explain why some countries gain migrants while others lose them. By adding migration rate per 100,000 people, the project gives a more fair comparison across countries and regions.
+
+Overall, this project started as a general look at migration and population over time, but it became clear that the best way to understand the data was not only to look at totals. Rates, regional patterns, and changes over time gave a more useful picture. This made the project a stronger example of how data cleaning, visualization, and simple modeling can help explain a real-world issue.
