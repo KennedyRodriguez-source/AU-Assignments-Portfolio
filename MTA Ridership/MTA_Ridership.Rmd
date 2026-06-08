@@ -1,0 +1,443 @@
+---
+title: "MTA Ridership Recovery and Prediction"
+author: "Kennedy Rodriguez"
+subtitle: Predicting Subway Ridership Using Other MTA Transportation Metrics
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    theme: readable
+  pdf_document:
+    toc: true
+---
+
+```{r setup, warning=FALSE, message=FALSE}
+library(tidyverse)
+library(splines)
+library(glmnet)
+library(readr)
+library(dplyr)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(randomForest)
+library(ggplot2)
+library(gridExtra)
+library(Metrics)
+library(knitr)
+
+options(scipen = 999)
+
+theme_set(theme_minimal(base_size = 13))
+```
+
+# Summary
+
+Using MTA daily ridership data from 2020 through 2025, this project examines the factors associated with subway ridership and compares several machine learning approaches for prediction and classification.
+
+For continuous ridership prediction, Ridge and Lasso regression were used to estimate total subway ridership based on activity across other transportation systems. For classification, Decision Trees and Random Forests were used to classify subway ridership levels as Low, Medium, or High.
+
+The results showed that Lasso slightly outperformed Ridge Regression in predictive accuracy, while Random Forest substantially outperformed Decision Trees for classification. Across the models, commuter rail systems such as the LIRR and Metro-North consistently emerged as some of the strongest predictors of subway demand.
+
+These findings suggest that regional commuting activity remains closely connected to subway usage and that machine learning models can be useful tools for transit planning, staffing, scheduling, and resource allocation.
+
+# Key Findings
+
+- Random Forest achieved over 93% classification accuracy and substantially outperformed the Decision Tree model.
+- Lasso Regression slightly outperformed Ridge Regression for predicting subway ridership.
+- Metro-North and LIRR ridership emerged as some of the strongest predictors of subway demand.
+- Commuter rail activity appears to be a stronger indicator of subway ridership than bus ridership or bridge-and-tunnel traffic.
+- Ensemble machine learning methods captured ridership patterns more effectively than a single decision tree.
+
+# Introduction
+
+The COVID-19 pandemic dramatically changed transportation patterns throughout New York City. Subway ridership fell sharply in 2020 before gradually recovering over the following years. Since the subway is connected to other parts of the transportation system, changes in commuter rail, buses, paratransit, and vehicle traffic can provide useful information about broader travel behavior.
+
+This project uses daily ridership data from the Metropolitan Transportation Authority (MTA) to investigate relationships between subway ridership and other transportation systems, including buses, commuter rail, Access-A-Ride, bridges and tunnels, and the Staten Island Railway.
+
+The main goal is to answer two questions:
+
+1. Can daily subway ridership be predicted using other transportation metrics?
+2. Can machine learning models classify daily ridership levels as Low, Medium, or High?
+
+# Data Source
+
+```{r load-data, echo=FALSE, message=FALSE, warning=FALSE}
+url <- "https://data.ny.gov/api/views/vxuj-8kew/rows.csv?accessType=DOWNLOAD"
+df <- read_csv(url)
+
+glimpse(df)
+```
+
+The dataset includes daily ridership and traffic measures across several MTA services. Subway ridership was used as the main response variable because it is one of the most important indicators of transit demand in New York City.
+
+## Ridership Recovery Since COVID-19
+
+```{r recovery-plot, echo=FALSE, fig.width=9, fig.height=5}
+df$Date <- as.Date(df$Date, format="%m/%d/%Y")
+
+ggplot(df, aes(x = Date, y = `Subways: Total Estimated Ridership`)) +
+  geom_line() +
+  labs(
+    title = "NYC Subway Ridership Recovery, 2020-2025",
+    subtitle = "Daily subway ridership gradually recovered following the COVID-19 pandemic",
+    x = "Date",
+    y = "Estimated Ridership"
+  )
+```
+
+The recovery was not linear. Ridership increased rapidly during 2021 and 2022 as economic activity resumed, but growth became more gradual in later years. Recurring seasonal fluctuations and periodic drops suggest that commuting behavior had not fully stabilized even several years after the initial pandemic shock.
+
+
+
+# Preparing Data for Regression
+
+```{r prepare-regression-data, include=FALSE}
+response_var <- "Subways: Total Estimated Ridership"
+
+predictor_vars <- c(
+  "Buses: Total Estimated Ridership", 
+  "LIRR: Total Estimated Ridership", 
+  "Metro-North: Total Estimated Ridership",
+  "Access-A-Ride: Total Scheduled Trips", 
+  "Bridges and Tunnels: Total Traffic", 
+  "Staten Island Railway: Total Estimated Ridership"
+)
+
+df_clean <- na.omit(df[, c(response_var, predictor_vars)])
+
+x <- as.matrix(df_clean[, predictor_vars])
+y <- df_clean[[response_var]]
+
+set.seed(168)
+train_indices <- sample(1:nrow(x), 0.8 * nrow(x))
+
+x_train <- x[train_indices, ]
+y_train <- y[train_indices]
+
+x_test  <- x[-train_indices, ]
+y_test  <- y[-train_indices]
+```
+
+The regression section uses total subway ridership as the response variable. The predictors include ridership or traffic measures from other MTA-related transportation systems.
+
+Because these predictors are likely related to one another, Ridge and Lasso regression are appropriate choices. Both methods help address multicollinearity by applying regularization, while Lasso can also perform variable selection by shrinking some coefficients toward zero.
+
+# Ridge and Lasso Regression
+
+```{r ridge-lasso-models, echo=FALSE}
+ridge_model <- cv.glmnet(x_train, y_train, alpha = 0)
+ridge_pred <- predict(ridge_model, s = ridge_model$lambda.min, newx = x_test)
+ridge_mse <- mean((ridge_pred - y_test)^2)
+
+lasso_model <- cv.glmnet(x_train, y_train, alpha = 1)
+lasso_pred <- predict(lasso_model, s = lasso_model$lambda.min, newx = x_test)
+lasso_mse <- mean((lasso_pred - y_test)^2)
+
+ridge_r2 <- 1 - sum((y_test - ridge_pred)^2) / sum((y_test - mean(y_test))^2)
+ridge_rmse <- rmse(y_test, ridge_pred)
+
+lasso_r2 <- 1 - sum((y_test - lasso_pred)^2) / sum((y_test - mean(y_test))^2)
+lasso_rmse <- rmse(y_test, lasso_pred)
+
+model_summary <- data.frame(
+  Model = c("Ridge", "Lasso"),
+  MSE = c(ridge_mse, lasso_mse),
+  R_squared = c(ridge_r2, lasso_r2),
+  RMSE = c(ridge_rmse, lasso_rmse)
+)
+
+kable(model_summary, digits = 3)
+```
+
+## Ridge and Lasso Performance
+
+```{r predicted-vs-actual}
+ridge_plot_df <- data.frame(
+  Actual = y_test,
+  Predicted = as.numeric(ridge_pred),
+  Model = "Ridge"
+)
+
+lasso_plot_df <- data.frame(
+  Actual = y_test,
+  Predicted = as.numeric(lasso_pred),
+  Model = "Lasso"
+)
+
+all_predictions_df <- rbind(ridge_plot_df, lasso_plot_df)
+
+ggplot(all_predictions_df, aes(x = Actual, y = Predicted, color = Model)) +
+  geom_point(alpha = 0.7) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "black") +
+  labs(
+    title = "Predicted vs. Actual Subway Ridership",
+    subtitle = "Ridge and Lasso predictions compared with observed ridership",
+    x = "Actual Subway Ridership",
+    y = "Predicted Subway Ridership",
+    color = "Model"
+  )
+```
+
+The predicted-versus-actual plot shows that both Ridge and Lasso regression capture overall ridership patterns reasonably well. Most observations fall near the 45-degree reference line, meaning the predicted values are generally close to the observed ridership values.
+
+Comparing model performance, Lasso achieved a slightly lower mean squared error than Ridge on the test set. While the difference is relatively small, it suggests that some predictors may contribute less information than others and that the feature-selection properties of Lasso help improve prediction accuracy.
+
+Overall, both models performed similarly, indicating that the transportation variables included in the analysis explain a meaningful portion of subway ridership variation.
+
+# Ridge and Lasso Cross-Validation
+
+```{r ridge-lasso-cv-plots}
+ridge_df <- data.frame(
+  log_lambda = log(ridge_model$lambda),
+  mse_mean = ridge_model$cvm,
+  mse_upper = ridge_model$cvup,
+  mse_lower = ridge_model$cvlo
+)
+
+lasso_df <- data.frame(
+  log_lambda = log(lasso_model$lambda),
+  mse_mean = lasso_model$cvm,
+  mse_upper = lasso_model$cvup,
+  mse_lower = lasso_model$cvlo
+)
+
+ridge_df <- ridge_df %>%
+  mutate(across(c(mse_mean, mse_upper, mse_lower), ~ .x / 1e9))
+
+lasso_df <- lasso_df %>%
+  mutate(across(c(mse_mean, mse_upper, mse_lower), ~ .x / 1e9))
+
+ridge_plot <- ggplot(ridge_df, aes(x = log_lambda, y = mse_mean)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = mse_lower, ymax = mse_upper), width = 0.05) +
+  labs(
+    title = "Ridge: CV MSE vs. Lambda", 
+    x = expression(log(lambda)), 
+    y = "Mean-Squared Error (Billions)"
+  ) +
+  scale_y_continuous(labels = scales::comma)
+
+lasso_plot <- ggplot(lasso_df, aes(x = log_lambda, y = mse_mean)) +
+  geom_point(size = 2) +
+  geom_errorbar(aes(ymin = mse_lower, ymax = mse_upper), width = 0.05) +
+  labs(
+    title = "Lasso: CV MSE vs. Lambda", 
+    x = expression(log(lambda)), 
+    y = "Mean-Squared Error (Billions)"
+  ) +
+  scale_y_continuous(labels = scales::comma)
+
+grid.arrange(ridge_plot, lasso_plot, ncol = 2)
+```
+
+The cross-validation curves illustrate how prediction error changes as the regularization penalty increases.
+
+For both Ridge and Lasso, the lowest prediction error occurs at relatively small values of lambda, suggesting that only moderate regularization is needed. As lambda increases further, prediction error rises because the models become increasingly constrained and begin to underfit the data.
+
+The similarity between the two curves indicates that both methods handle multicollinearity effectively. However, Lasso achieves slightly lower prediction error while also performing variable selection, making it the more interpretable model in this case.
+
+# Classification: Decision Tree and Random Forest
+
+Regression predicts total subway ridership as a continuous value. For a transit agency, however, it can also be useful to classify ridership levels into general categories such as Low, Medium, and High. These categories can help with operational decisions such as staffing, scheduling, and resource planning.
+
+```{r create-classification-target, echo=FALSE}
+quantiles <- quantile(df_clean[[response_var]], probs = c(0.33, 0.66))
+
+df_clean$ridership_class <- cut(
+  df_clean[[response_var]],
+  breaks = c(-Inf, quantiles, Inf),
+  labels = c("Low", "Medium", "High"),
+  right = TRUE
+)
+
+table(df_clean$ridership_class)
+```
+
+```{r classification-split, include=FALSE}
+set.seed(168)
+train_index <- createDataPartition(df_clean$ridership_class, p = 0.8, list = FALSE)
+
+train_data <- df_clean[train_index, ]
+test_data  <- df_clean[-train_index, ]
+
+train_data_clean <- train_data %>%
+  rename_with(~ gsub("[^[:alnum:]_]", "_", .))
+
+test_data_clean <- test_data %>%
+  rename_with(~ gsub("[^[:alnum:]_]", "_", .))
+```
+
+# Decision Tree Model
+
+```{r decision-tree, echo=FALSE}
+tree_model <- rpart(
+  ridership_class ~ Buses__Total_Estimated_Ridership +
+    LIRR__Total_Estimated_Ridership +
+    Metro_North__Total_Estimated_Ridership +
+    Access_A_Ride__Total_Scheduled_Trips +
+    Bridges_and_Tunnels__Total_Traffic +
+    Staten_Island_Railway__Total_Estimated_Ridership,
+  data = train_data_clean,
+  method = "class",
+  control = rpart.control(maxdepth = 5, minsplit = 30)
+)
+
+printcp(tree_model)
+
+pruned_tree <- prune(
+  tree_model,
+  cp = tree_model$cptable[which.min(tree_model$cptable[, "xerror"]), "CP"]
+)
+
+rpart.plot(pruned_tree, type = 2, extra = 104, fallen.leaves = TRUE)
+```
+
+## Decision Tree Interpretation
+
+The decision tree identifies several transportation systems that are strongly associated with subway ridership levels. In particular, LIRR, Metro-North, Access-A-Ride, and Staten Island Railway activity appear in the final tree structure.
+
+One interesting result is that bus ridership and bridge-and-tunnel traffic did not appear as major splitting variables. While these factors may influence overall transportation demand, they were less useful for separating days into low, medium, and high subway ridership categories.
+
+The first split in the decision tree is based on LIRR ridership, indicating that commuter rail activity provides the strongest single signal for distinguishing low-ridership days from higher-ridership days.
+
+# Random Forest Model
+
+```{r random-forest, echo=FALSE}
+rf_model <- randomForest(
+  ridership_class ~ Buses__Total_Estimated_Ridership +
+    LIRR__Total_Estimated_Ridership +
+    Metro_North__Total_Estimated_Ridership +
+    Access_A_Ride__Total_Scheduled_Trips +
+    Bridges_and_Tunnels__Total_Traffic +
+    Staten_Island_Railway__Total_Estimated_Ridership,
+  data = train_data_clean,
+  ntree = 500,
+  importance = TRUE
+)
+
+print(rf_model)
+```
+
+## Evaluating the Decision Tree and Random Forest
+
+```{r model-evaluation, echo=FALSE}
+tree_pred <- predict(tree_model, test_data_clean, type = "class")
+rf_pred   <- predict(rf_model, test_data_clean)
+
+tree_cm <- confusionMatrix(tree_pred, test_data_clean$ridership_class)
+rf_cm <- confusionMatrix(rf_pred, test_data_clean$ridership_class)
+
+tree_cm
+rf_cm
+```
+
+```{r classification-accuracy, echo=FALSE}
+tree_accuracy <- sum(tree_pred == test_data_clean$ridership_class) / length(tree_pred)
+rf_accuracy <- sum(rf_pred == test_data_clean$ridership_class) / length(rf_pred)
+
+accuracy_summary <- data.frame(
+  Model = c("Decision Tree", "Random Forest"),
+  Accuracy = c(tree_accuracy, rf_accuracy)
+)
+
+kable(accuracy_summary, digits = 4)
+```
+
+## Random Forest Interpretation
+
+The Random Forest model achieved substantially higher classification accuracy than the decision tree. This improvement is expected because Random Forests combine many individual trees and average their predictions, which reduces variance and improves generalization.
+
+The model correctly classified more than 93% of observations and achieved a Kappa statistic close to 0.90, indicating strong agreement beyond chance.
+
+These results suggest that subway ridership is influenced by multiple interacting factors that cannot always be captured by a single decision tree.
+
+# Random Forest Feature Importance
+
+```{r variable-importance, echo=FALSE}
+rf_importance <- importance(rf_model)
+
+rf_importance_df <- data.frame(
+  Feature = rownames(rf_importance),
+  Importance = rf_importance[, 1]
+) %>%
+  arrange(desc(Importance))
+
+kable(rf_importance_df, digits = 3)
+```
+
+```{r variable-importance-plot, echo=FALSE, fig.width=9, fig.height=5}
+ggplot(rf_importance_df, aes(x = reorder(Feature, Importance), y = Importance)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Random Forest Feature Importance",
+    subtitle = "Most important predictors for classifying subway ridership levels",
+    x = "Feature",
+    y = "Importance"
+  )
+```
+
+## Feature Importance Interpretation
+
+The feature importance results reveal that commuter rail systems such as the LIRR and Metro-North are among the strongest predictors of subway ridership levels. One unexpected finding is the importance of Staten Island Railway ridership. Although it serves a much smaller portion of the transit network, changes in Staten Island Railway activity appear to be strongly associated with broader ridership patterns.
+
+This relationship makes practical sense because many commuters use a combination of commuter rail and subway services during their daily trips. Changes in regional commuting patterns therefore tend to affect multiple transportation systems at the same time.
+
+Access-A-Ride also emerged as an important predictor, suggesting that broader transportation demand across rider populations may be linked to overall subway activity.
+
+Interestingly, bridge-and-tunnel traffic and bus ridership contributed less to classification performance. While these systems may still influence overall transportation demand, they appear to be weaker indicators of whether subway ridership will be classified as low, medium, or high.
+
+# Cross-Validation: Decision Tree
+
+```{r decision-tree-cv}
+set.seed(168)
+
+train_control <- trainControl(method = "cv", number = 10)
+
+tree_cv_model <- train(
+  ridership_class ~ Buses__Total_Estimated_Ridership +
+    LIRR__Total_Estimated_Ridership +
+    Metro_North__Total_Estimated_Ridership +
+    Access_A_Ride__Total_Scheduled_Trips +
+    Bridges_and_Tunnels__Total_Traffic +
+    Staten_Island_Railway__Total_Estimated_Ridership,
+  data = train_data_clean,
+  method = "rpart",
+  trControl = train_control
+)
+
+tree_cv_model
+
+tree_pred_cv <- predict(tree_cv_model, test_data_clean)
+
+tree_cv_cm <- confusionMatrix(tree_pred_cv, test_data_clean$ridership_class)
+tree_cv_cm
+```
+
+The cross-validated decision tree confirms the same general pattern seen earlier. While the tree remains useful and interpretable, it does not match the predictive strength of the Random Forest. Random Forest performs better across overall accuracy, Kappa, sensitivity, specificity, and balanced accuracy.
+
+This reinforces one of the main findings of the classification section: subway ridership is better captured by an ensemble model than by a single tree.
+
+# Limitations
+
+Several limitations should be considered when interpreting these results.
+
+First, the analysis is based on observational data, meaning the relationships identified by the models should not be interpreted as causal.
+
+Second, the dataset covers a unique post-pandemic recovery period. Travel behavior during this period may differ from long-term transportation patterns.
+
+Finally, factors such as weather conditions, major events, holidays, economic indicators, and remote-work trends were not included in the analysis. Incorporating these variables could further improve predictive performance and provide additional insight into ridership behavior.
+
+# Conclusions
+
+Several important findings emerged from this analysis.
+
+First, both Ridge and Lasso regression demonstrated that ridership across different transportation systems can be used to predict subway ridership with reasonable accuracy. Lasso provided slightly stronger predictive performance while also simplifying the model through variable selection.
+
+Second, Random Forest clearly outperformed Decision Trees for ridership classification, achieving over 93% accuracy. This suggests that subway ridership is driven by complex interactions among transportation variables rather than simple decision rules.
+
+Finally, commuter rail systems consistently emerged as the strongest predictors across multiple modeling approaches. This highlights the close relationship between regional commuting patterns and subway demand. As ridership continues to evolve following the COVID-19 pandemic, understanding these connections may help transit agencies make more informed decisions regarding scheduling, staffing, and long-term planning.
+
+
