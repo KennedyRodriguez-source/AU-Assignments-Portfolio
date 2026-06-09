@@ -7,11 +7,11 @@ Projects:
    — early visualization project
 2. World Migration and Population Over Time. On April 20th 2024
    — data visualization, regression, global trends
-3. Is food a Problem? - Self Made Survey. On Nov 18th 2024
+3. **Is food a Problem?** - Self Made Survey. On Nov 18th 2024
    — original survey, sampling, GIS, logistic regression
 4. What Drives Airbnb Guest Ratings? On Dec 10th 2024
    — regression, feature analysis, business interpretation
-5. MTA Ridership. May 5th 2025
+5. **MTA Ridership**. May 5th 2025
    — machine learning, Ridge/Lasso, Decision Tree, Random Forest, 93.2% accuracy
 
 Skills:
