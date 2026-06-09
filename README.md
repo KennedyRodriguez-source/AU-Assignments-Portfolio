@@ -30,4 +30,11 @@ Analysis of factors associated with Airbnb guest ratings using statistical model
 
 [View HTML Report](https://kennedyrodriguez-source.github.io/AU-Assignments-Portfolio/Airbnb%20Guest%20%20Ratings/Airbnb_Guest_Ratings.html)
 
+---
+
+### Australian Weather Patterns Analysis
+Exploratory analysis of Australian weather patterns using data visualization and statistical techniques.
+
+[View HTML Report](https://kennedyrodriguez-source.github.io/AU-Assignments-Portfolio/Australian%20Weather/Australian_Weather.html)
+
 
