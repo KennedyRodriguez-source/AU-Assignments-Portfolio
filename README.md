@@ -1,27 +1,33 @@
-Kennedy Rodriguez
-Data Science Graduate
+# Kennedy Rodriguez
+### Data Science Graduate
 
-Projects:
 
-1. Australian Weather Patterns Over Five Years. on Dec 6th 2023.
-   — early visualization project
-2. World Migration and Population Over Time. On April 20th 2024
-   — data visualization, regression, global trends
-3. **Is food a Problem?** - Self Made Survey. On Nov 18th 2024
-   — original survey, sampling, GIS, logistic regression
-4. What Drives Airbnb Guest Ratings? On Dec 10th 2024
-   — regression, feature analysis, business interpretation
-5. **MTA Ridership**. May 5th 2025
-   — machine learning, Ridge/Lasso, Decision Tree, Random Forest, 93.2% accuracy
+## Featured Projects
 
-Skills:
-R
-Machine Learning
-Statistical Analysis
-Sampling
-Data visualization
-Statistical modeling
-Survey methodology
-GIS/spatial thinking
-Policy analysis
-Communication of findings
+### NYC MTA Ridership Recovery Analysis
+Machine learning analysis of MTA ridership recovery using Ridge Regression, Lasso Regression, Decision Trees, and Random Forests.
+
+[View HTML Report](https://kennedyrodriguez-source.github.io/AU-Assignments-Portfolio/MTA%20Ridership/MTA_Ridership.html)
+
+---
+
+### Food Insecurity Survey Analysis
+Original survey design, cluster sampling, GIS mapping, and logistic regression analysis of food insecurity in Washington, DC.
+
+[Download Report](https://github.com/KennedyRodriguez-source/AU-Assignments-Portfolio/raw/main/Food%20Insecurity/Is%20Food%20A%20Problem%20Report.docx)
+
+---
+
+### World Migration Population Analysis
+Exploratory data analysis and regression modeling of global migration and population trends.
+
+[View HTML Report](https://kennedyrodriguez-source.github.io/AU-Assignments-Portfolio/World%20Migration%20Population/Global_Migration_Population.html)
+
+---
+
+### Airbnb Guest Ratings Analysis
+Analysis of factors associated with Airbnb guest ratings using statistical modeling and visualization.
+
+[View HTML Report](https://kennedyrodriguez-source.github.io/AU-Assignments-Portfolio/Airbnb%20Guest%20%20Ratings/Airbnb_Guest_Ratings.html)
+
+
