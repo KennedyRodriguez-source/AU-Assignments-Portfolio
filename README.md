@@ -1,5 +1,7 @@
 # Kennedy Rodriguez
-### Data Science Graduate
+### Data Analytics Portfolio
+Recent Data Science graduate with experience in machine learning,
+statistical analysis, survey research, and data visualization.
 
 
 ## Featured Projects
